@@ -49,7 +49,7 @@
     "productName": "Mr_Ed Sampling Suite",
     "copyright": "Copyright © 2025 Mr_Ed Sampling Suite",
     "directories": {
-      "output": "dist-electron"
+      "output": "dist-electron-v3"
     },
     "files": [
       "dist/**/*",

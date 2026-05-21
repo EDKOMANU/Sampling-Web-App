@@ -139,12 +139,26 @@ function App() {
   
   // Strata Allocation UI States
   const [allocTargetN, setAllocTargetN] = useState<number>(500);
+  const [syncWithEstimatedSize, setSyncWithEstimatedSize] = useState<boolean>(true);
   const [allocMethod, setAllocMethod] = useState<'proportional' | 'equal' | 'neyman'>('proportional');
   const [allocStrataCol, setAllocStrataCol] = useState<string>('');
   const [allocVarCol, setAllocVarCol] = useState<string>('');
   const [manualStrataInput, setManualStrataInput] = useState<string>('Urban: 60000\nRural: 40000');
   const [allocatedStrataList, setAllocatedStrataList] = useState<{ stratum: string; size: number; share: number; allocated: number }[]>([]);
 
+  // --- Global Dropdown Freeze Fix ---
+  // Native window.alert can lock the UI in Electron. We replace it with an in-app toast notification.
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    window.alert = (msg) => {
+      setToastMsg(String(msg));
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => setToastMsg(null), 4500);
+    };
+    return () => clearTimeout(timeoutId);
+  }, []);
 
   // Multi-stage sampling state
   const [multistageStages, setMultistageStages] = useState<StageConfig[]>([
@@ -675,6 +689,22 @@ function App() {
     }
   }, [frameColumns]);
 
+  // Sync allocation target with estimated complex survey sample size
+  useEffect(() => {
+    if (syncWithEstimatedSize && complexSurveyN > 0) {
+      setAllocTargetN(complexSurveyN);
+      setSamplingSampleSize(complexSurveyN);
+    }
+  }, [complexSurveyN, syncWithEstimatedSize]);
+
+  // Run allocation automatically in real-time
+  useEffect(() => {
+    const hasStrata = (allocStrataCol && populationFrame.length > 0) || manualStrataInput;
+    if (hasStrata && allocTargetN > 0) {
+      handleRunAllocation();
+    }
+  }, [allocTargetN, allocMethod, allocStrataCol, allocVarCol, manualStrataInput, populationFrame]);
+
   // --- Sampling Draw Controller ---
   const [selectedSamplingMethod, setSelectedSamplingMethod] = useState<'srswor' | 'srswr' | 'systematic' | 'stratified' | 'stratified_sys' | 'pps' | 'cluster' | 'multistage'>('srswor');
   const [samplingSampleSize, setSamplingSampleSize] = useState<number>(500);
@@ -1030,16 +1060,20 @@ function App() {
         {
           label: 'Original Base Weights',
           data: getQuantiles(rawWeights),
-          backgroundColor: 'rgba(99, 102, 241, 0.5)',
+          backgroundColor: 'rgba(99, 102, 241, 0.2)',
           borderColor: 'rgba(99, 102, 241, 1)',
-          borderWidth: 1
+          borderWidth: 2,
+          fill: true,
+          tension: 0.4
         },
         {
           label: 'Raked & Calibrated Weights',
           data: getQuantiles(calibratedWeights),
-          backgroundColor: 'rgba(16, 185, 129, 0.5)',
+          backgroundColor: 'rgba(16, 185, 129, 0.2)',
           borderColor: 'rgba(16, 185, 129, 1)',
-          borderWidth: 1
+          borderWidth: 2,
+          fill: true,
+          tension: 0.4
         }
       ]
     };
@@ -1071,11 +1105,26 @@ function App() {
   return (
     <div className={`min-h-screen bg-gradient-mesh transition-colors duration-300 font-sans`}>
       
+      {/* Global Toast Notification */}
+      {toastMsg && (
+        <div className="fixed top-24 left-1/2 transform -translate-x-1/2 z-[100] animate-in fade-in slide-in-from-top-4 duration-300">
+          <div className="bg-gray-900/95 border border-indigo-500/40 shadow-2xl shadow-indigo-900/30 backdrop-blur-xl rounded-2xl px-6 py-4 flex items-center gap-4 min-w-[300px] max-w-lg">
+            <div className="text-indigo-400 bg-indigo-500/10 p-2 rounded-full border border-indigo-500/20">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            </div>
+            <p className="text-sm font-medium text-white flex-1">{toastMsg}</p>
+            <button onClick={() => setToastMsg(null)} className="text-gray-500 hover:text-white transition-colors bg-white/5 hover:bg-white/10 p-1.5 rounded-full">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* HEADER SECTION */}
       <header className="border-b border-white/10 px-6 py-4 flex items-center justify-between glass-panel sticky top-0 z-50">
         <div className="flex items-center gap-3">
           <div className="bg-white/5 p-1 rounded-xl border border-white/10 glow-primary flex items-center justify-center overflow-hidden h-11 w-11">
-            <img src="/Adobe_Express_20230514_0702330_1.png" alt="Mr_Ed' Sampling Suite Logo" className="h-full w-full object-contain" />
+            <img src="./Adobe_Express_20230514_0702330_1.png" alt="Mr_Ed' Sampling Suite Logo" className="h-full w-full object-contain" />
           </div>
           <div>
             <h1 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-300 to-pink-400 tracking-tight m-0">
@@ -1675,9 +1724,13 @@ function App() {
                               y: { 
                                 grid: { color: 'rgba(255, 255, 255, 0.05)' }, 
                                 ticks: { color: '#9ca3af' },
-                                title: { display: true, text: 'Required Sample Size', color: '#9ca3af' }
+                                title: { display: true, text: 'Required Sample Size', color: '#9ca3af', font: { size: 11 } }
                               },
-                              x: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#9ca3af' } }
+                              x: { 
+                                grid: { color: 'rgba(255, 255, 255, 0.05)' }, 
+                                ticks: { color: '#9ca3af' },
+                                title: { display: true, text: 'Statistical Formula Method', color: '#9ca3af', font: { size: 11 } }
+                              }
                             },
                             plugins: { 
                               legend: { labels: { color: '#f3f4f6' } },
@@ -1709,18 +1762,56 @@ function App() {
                   
                   {/* Allocation Settings */}
                   <div className="space-y-4">
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-400 mb-1">Target Sample Size to Allocate (n)</label>
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-xs font-semibold text-gray-400">Target Sample Size to Allocate (n)</label>
+                        {syncWithEstimatedSize && (
+                          <span className="text-[10px] font-bold text-pink-400 bg-pink-500/10 px-2 py-0.5 rounded border border-pink-500/20 font-mono uppercase tracking-wider animate-pulse">
+                            Design Adjusted
+                          </span>
+                        )}
+                      </div>
+                      
+                      <div className="flex items-center gap-2 bg-indigo-500/5 border border-indigo-500/10 p-2.5 rounded-xl">
+                        <input
+                          type="checkbox"
+                          id="syncSampleCalc"
+                          checked={syncWithEstimatedSize}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            setSyncWithEstimatedSize(checked);
+                            if (checked) {
+                              setAllocTargetN(complexSurveyN);
+                              setSamplingSampleSize(complexSurveyN);
+                            }
+                          }}
+                          className="rounded text-indigo-600 focus:ring-indigo-500 bg-gray-900 border-white/10"
+                        />
+                        <label htmlFor="syncSampleCalc" className="text-[11px] font-semibold text-gray-300 cursor-pointer select-none">
+                          Sync with Sample Size Calculator ({complexSurveyN})
+                        </label>
+                      </div>
+
                       <input
                         type="number"
                         value={allocTargetN}
+                        disabled={syncWithEstimatedSize}
                         onChange={(e) => {
                           const val = parseInt(e.target.value) || 0;
                           setAllocTargetN(val);
                           setSamplingSampleSize(val);
                         }}
-                        className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                        className={`w-full bg-gray-900 border rounded-lg px-3 py-2 text-sm focus:outline-none transition-all ${
+                          syncWithEstimatedSize 
+                            ? 'border-indigo-500/30 text-indigo-300 font-bold bg-indigo-500/5 cursor-not-allowed' 
+                            : 'border-white/10 text-white focus:border-indigo-500'
+                        }`}
                       />
+                      {syncWithEstimatedSize && (
+                        <p className="text-[10px] text-gray-500 leading-normal">
+                          Automatically locked to the estimated required sample size, factoring in the chosen Cochran/Slovin formula, a **Design Effect (Deff) of {ssDeff}**, and an **expected response rate of {Math.round(ssRR * 100)}%**.
+                        </p>
+                      )}
                     </div>
 
                     <div>
@@ -1871,17 +1962,34 @@ function App() {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-gray-400 mb-1">Target Sample Size to Draw (n)</label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-semibold text-gray-400">Target Sample Size to Draw (n)</label>
+                      {syncWithEstimatedSize && (
+                        <span className="text-[9px] font-bold text-pink-400 bg-pink-500/10 px-2 py-0.5 rounded border border-pink-500/20 font-mono uppercase tracking-wider animate-pulse">
+                          Design Adjusted
+                        </span>
+                      )}
+                    </div>
                     <input
                       type="number"
                       value={samplingSampleSize}
+                      disabled={syncWithEstimatedSize}
                       onChange={(e) => {
                         const val = parseInt(e.target.value) || 0;
                         setSamplingSampleSize(val);
                         setAllocTargetN(val);
                       }}
-                      className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                      className={`w-full bg-gray-900 border rounded-lg px-3 py-2 text-sm focus:outline-none transition-all ${
+                        syncWithEstimatedSize 
+                          ? 'border-indigo-500/30 text-indigo-300 font-bold bg-indigo-500/5 cursor-not-allowed' 
+                          : 'border-white/10 text-white focus:border-indigo-500'
+                      }`}
                     />
+                    {syncWithEstimatedSize && (
+                      <p className="text-[10px] text-gray-500 mt-1">
+                        Locked to complex survey size ({complexSurveyN}). Change calculator settings in Tab 2 to adjust.
+                      </p>
+                    )}
                   </div>
 
                   <div>
@@ -2138,10 +2246,14 @@ function App() {
                               scales: {
                                 y: { 
                                   grid: { color: 'rgba(255, 255, 255, 0.05)' }, 
-                                  ticks: { color: '#9ca3af' },
-                                  title: { display: true, text: 'Distribution Share (%)', color: '#9ca3af', font: { size: 10 } }
+                                  ticks: { color: '#9ca3af', font: { size: 10 } },
+                                  title: { display: true, text: 'Distribution Share (%)', color: '#9ca3af', font: { size: 11 } }
                                 },
-                                x: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#9ca3af' } }
+                                x: { 
+                                  grid: { color: 'rgba(255, 255, 255, 0.05)' }, 
+                                  ticks: { color: '#9ca3af', font: { size: 10 } },
+                                  title: { display: true, text: 'Demographic Categories', color: '#9ca3af', font: { size: 11 } }
+                                }
                               },
                               plugins: { 
                                 legend: { labels: { color: '#f3f4f6', font: { size: 10 } }, position: 'bottom' }
@@ -2545,6 +2657,19 @@ function App() {
                 {/* Weighting Overview & Comparison Summary */}
                 <div className="lg:col-span-2 space-y-6">
                   
+                  <div className="flex justify-between items-center mb-2">
+                    <h2 className="text-xl font-bold text-white">Weighting & Calibration Results</h2>
+                    {weightedSample.length > 0 && (
+                      <button
+                        onClick={handleExportWeightedSample}
+                        className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white hover-lift text-sm font-bold flex items-center gap-2 shadow-lg shadow-emerald-900/30 transition-all border border-emerald-400/30"
+                      >
+                        <Download className="h-4 w-4" />
+                        Download Calibrated Dataset
+                      </button>
+                    )}
+                  </div>
+
                   {/* Stat cards comparison */}
                   {weightSummaryWeighted && (
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -2575,6 +2700,35 @@ function App() {
                         </p>
                       </div>
 
+                    </div>
+                  )}
+
+                  {/* Weight dispersion chart */}
+                  {weightedSample.length > 0 && (
+                    <div className="glass-panel border border-white/5 rounded-2xl p-6">
+                      <h3 className="text-sm font-bold text-white mb-4">Survey Weight Distribution Shift</h3>
+                      <div className="h-64">
+                        <Line
+                          data={getWeightComparisonChartData()}
+                          options={{
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            scales: {
+                              y: { 
+                                grid: { color: 'rgba(255, 255, 255, 0.05)' }, 
+                                ticks: { color: '#9ca3af' },
+                                title: { display: true, text: 'Weight Value', color: '#9ca3af', font: { size: 11 } }
+                              },
+                              x: { 
+                                grid: { color: 'rgba(255, 255, 255, 0.05)' }, 
+                                ticks: { color: '#9ca3af' },
+                                title: { display: true, text: 'Population Deciles (Q1-Q10)', color: '#9ca3af', font: { size: 11 } }
+                              }
+                            },
+                            plugins: { legend: { labels: { color: '#f3f4f6' } } }
+                          }}
+                        />
+                      </div>
                     </div>
                   )}
 
@@ -2695,16 +2849,69 @@ function App() {
                 const unweightedCounts: Record<string, number> = {};
                 const weightedSums: Record<string, number> = {};
                 
-                // Retrieve unweighted base
                 const baseData = weightingSource === 'uploaded' ? surveyData : sampleResult;
+
+                // Detect if numerical
+                let isNumeric = false;
+                let numericCount = 0;
+                let totalNonEmpty = 0;
+                let minVal = Infinity;
+                let maxVal = -Infinity;
+                
                 baseData.forEach(row => {
-                  const val = String(row[col] !== undefined && row[col] !== null ? row[col] : 'Unknown');
+                  const val = row[col];
+                  if (val !== undefined && val !== null && String(val).trim() !== '') {
+                    totalNonEmpty++;
+                    const num = Number(val);
+                    if (!isNaN(num)) {
+                      numericCount++;
+                      if (num < minVal) minVal = num;
+                      if (num > maxVal) maxVal = num;
+                    }
+                  }
+                });
+                
+                // Classify as numeric if >90% are numbers and it has enough spread
+                if (totalNonEmpty > 0 && numericCount / totalNonEmpty >= 0.9 && maxVal > minVal) {
+                  // Only treat as numerical for binning if there are more than 10 unique values
+                  const uniqueNums = new Set(baseData.map(r => r[col]).filter(v => v !== undefined && v !== null && !isNaN(Number(v))));
+                  if (uniqueNums.size > 10) {
+                    isNumeric = true;
+                  }
+                }
+                
+                let bins: { min: number, max: number, label: string }[] = [];
+                if (isNumeric) {
+                  const binSize = (maxVal - minVal) / 10;
+                  for (let i = 0; i < 10; i++) {
+                    const bMin = minVal + i * binSize;
+                    const bMax = i === 9 ? maxVal : minVal + (i + 1) * binSize;
+                    bins.push({
+                      min: bMin,
+                      max: bMax,
+                      label: `[${bMin.toFixed(1)} - ${bMax.toFixed(1)}]`
+                    });
+                  }
+                }
+                
+                const getLabel = (val: any) => {
+                  if (val === undefined || val === null || String(val).trim() === '') return 'Unknown';
+                  if (!isNumeric) return String(val);
+                  const num = Number(val);
+                  if (isNaN(num)) return 'Unknown';
+                  const bin = bins.find(b => num >= b.min && num <= b.max) || bins[bins.length - 1];
+                  return bin ? bin.label : 'Unknown';
+                };
+
+                // Retrieve unweighted base
+                baseData.forEach(row => {
+                  const val = getLabel(row[col]);
                   unweightedCounts[val] = (unweightedCounts[val] || 0) + 1;
                 });
                 
                 // Retrieve weighted base
                 weightedSample.forEach(row => {
-                  const val = String(row[col] !== undefined && row[col] !== null ? row[col] : 'Unknown');
+                  const val = getLabel(row[col]);
                   weightedSums[val] = (weightedSums[val] || 0) + (Number(row.weight) || 0);
                 });
                 
@@ -2744,8 +2951,20 @@ function App() {
                   };
                 });
                 
-                // Sort levels by unweighted counts desc
-                levelsSummary.sort((a, b) => b.uwCount - a.uwCount);
+                // Sort levels
+                if (isNumeric) {
+                  levelsSummary.sort((a, b) => {
+                    const getMin = (lbl: string) => {
+                      if (lbl === 'Unknown') return Infinity;
+                      const match = lbl.match(/\[([\d.-]+)\s*-/);
+                      return match ? parseFloat(match[1]) : 0;
+                    };
+                    return getMin(a.level) - getMin(b.level);
+                  });
+                } else {
+                  // Sort levels by unweighted counts desc
+                  levelsSummary.sort((a, b) => b.uwCount - a.uwCount);
+                }
                 
                 // Calculate Dissimilarity Index relative to target (if target exists) or relative to unweighted (if no target)
                 let dissimilarityBefore = 0;
@@ -2982,7 +3201,9 @@ function App() {
                           const audit = getDemographicsAudit(col);
                           
                           // Prepare Chart.js dataset
-                          const categories = audit.levelsSummary.map(r => r.level).slice(0, 8); // cap at 8 to fit nicely in chart
+                          const isColNumeric = audit.levelsSummary.length > 0 && audit.levelsSummary[0].level.startsWith('[');
+                          const limit = isColNumeric ? 12 : 8; // cap at 8 for categorical to fit nicely, 12 for numeric bins
+                          const categories = audit.levelsSummary.map(r => r.level).slice(0, limit);
                           const unweightedData = categories.map(cat => {
                             return audit.levelsSummary.find(r => r.level === cat)?.uwShare || 0;
                           });
@@ -3087,11 +3308,12 @@ function App() {
                                         y: {
                                           grid: { color: 'rgba(255, 255, 255, 0.05)' },
                                           ticks: { color: '#9ca3af', font: { size: 9 } },
-                                          title: { display: true, text: 'Share of Demographics (%)', color: '#9ca3af', font: { size: 9 } }
+                                          title: { display: true, text: 'Share of Demographics (%)', color: '#9ca3af', font: { size: 11 } }
                                         },
                                         x: {
                                           grid: { color: 'rgba(255, 255, 255, 0.05)' },
-                                          ticks: { color: '#9ca3af', font: { size: 9 } }
+                                          ticks: { color: '#9ca3af', font: { size: 9 } },
+                                          title: { display: true, text: 'Demographic Categories / Numeric Bins', color: '#9ca3af', font: { size: 11 } }
                                         }
                                       },
                                       plugins: {
@@ -3366,26 +3588,7 @@ function App() {
 
                   </div>
 
-                  {/* Weight dispersion chart */}
-                  {weightedSample.length > 0 && (
-                    <div className="glass-panel border border-white/5 rounded-2xl p-6">
-                      <h3 className="text-sm font-bold text-white mb-4">Survey Weight Distribution Shift</h3>
-                      <div className="h-64">
-                        <Bar
-                          data={getWeightComparisonChartData()}
-                          options={{
-                            responsive: true,
-                            maintainAspectRatio: false,
-                            scales: {
-                              y: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#9ca3af' } },
-                              x: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#9ca3af' } }
-                            },
-                            plugins: { legend: { labels: { color: '#f3f4f6' } } }
-                          }}
-                        />
-                      </div>
-                    </div>
-                  )}
+
 
                 </div>
 
