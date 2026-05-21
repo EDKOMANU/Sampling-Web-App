@@ -464,7 +464,7 @@ export default function MethodologyHub({ setActiveTab }: MethodologyHubProps) {
             onClick={() => setHubTab('raking')}
             className={`px-3 py-1.5 rounded-lg transition-all font-medium ${hubTab === 'raking' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}
           >
-            Raking (IPF)
+            Calibration Sandbox
           </button>
           <button
             onClick={() => setHubTab('quiz')}
@@ -497,7 +497,7 @@ export default function MethodologyHub({ setActiveTab }: MethodologyHubProps) {
                   { title: "2. Sample Size & Allocation", desc: "Cochran formulas & strata quotas" },
                   { title: "3. Representative Sample Draw", desc: "SRS, Systematic, Cluster draws" },
                   { title: "4. Non-Response Weight Adjustments", desc: "Weight class inflation & propensity models" },
-                  { title: "5. Calibration Raking (IPF)", desc: "Matching known population census totals" },
+                  { title: "5. Calibration Suite (IPF, GREG, Logit)", desc: "Aligning sample weights to known demographics" },
                   { title: "6. Variance & Design-based SEs", desc: "Taylor series linearization vs bootstrap" }
                 ].map((step, idx) => (
                   <button
@@ -535,7 +535,7 @@ export default function MethodologyHub({ setActiveTab }: MethodologyHubProps) {
                         "Sample Size Calculation & Stratum Allocation",
                         "Representative Selection Draw",
                         "Non-Response Weight Adjustments",
-                        "Calibration Raking (Iterative Proportional Fitting)",
+                        "Calibration Suite (Multiplicative, Linear & Bounded Logit)",
                         "Variance Estimation & Design-Based Analytics"
                       ][activeStep]}
                     </h3>
@@ -629,17 +629,48 @@ export default function MethodologyHub({ setActiveTab }: MethodologyHubProps) {
                 {activeStep === 4 && (
                   <div className="space-y-4 text-xs text-gray-300 leading-relaxed">
                     <p>
-                      **Raking (Calibration)** forces the sums of our adjusted weights to match known external population marginal aggregates (such as census counts for region, age groups, and gender). This removes coverage bias and aligns the sample with the real world.
+                      **Calibration** adjusts survey weights so that the sample's weighted distribution aligns perfectly with external population control totals (e.g., census proportions). This step resolves coverage gaps and non-response bias.
                     </p>
                     <p>
-                      It utilizes **Iterative Proportional Fitting (IPF)**, sequentially multiplying cell weights margin-by-margin until the weighted sample totals converge perfectly onto census marginals.
+                      Mr_Ed' Sampling Suite supports **Dual Data Sourcing**: you can calibrate weights either using actively drawn sample data or uploaded external fieldwork survey files. These are adjusted against the original census frame or custom uploaded demographic target registries.
                     </p>
-                    <div className="bg-white/5 border border-white/5 p-4 rounded-xl">
-                      <h4 className="font-bold text-white font-mono uppercase tracking-wider text-[10px] text-indigo-300">mathematical guarantee:</h4>
-                      <p className="text-[11px] text-gray-300 mt-1">
-                        Ensures that sum(w_i) = T_c for all categories c across multiple margins simultaneously. Trim levels can be activated to cap extreme weights and limit variance runaway.
-                      </p>
+
+                    <div className="space-y-3 bg-white/5 border border-white/5 p-4 rounded-xl">
+                      <h4 className="font-bold text-white font-mono uppercase tracking-wider text-[10px] text-indigo-300">Three Advanced Calibration Solvers:</h4>
+                      
+                      <div className="space-y-2 text-[11px]">
+                        <p>
+                          1. **Multiplicative Raking (IPF)**: Iteratively multiplies base weights margin-by-margin. It is multiplicative, meaning weights scale exponentially and are mathematically guaranteed to remain strictly positive ({"$w_i > 0$"}).
+                        </p>
+                        <p>
+                          2. **Linear Calibration (GREG Solver)**: A single-step analytical solver using Lagrange multipliers, matching Generalized Regression (GREG) estimation equations. Weights are computed as:
+                          {"$$w_i = d_i (1 + \\mathbf{x}_i^T \\boldsymbol{\\lambda})$$"}
+                          {"where \\(\\boldsymbol{\\lambda} = \\left(\\sum_i d_i \\mathbf{x}_i \\mathbf{x}_i^T\\right)^{-1} (\\mathbf{T} - \\sum_i d_i \\mathbf{x}_i)\\). Highly efficient, though weights can occasionally be negative."}
+                        </p>
+                        <p>
+                          3. **Logit Calibration (Bounded Ratio)**: Bounded Iterative Proportional Fitting that restricts weight multipliers strictly within user-defined upper ({"$U$"}) and lower ({"$L$"}) bounds. This prevents extreme multipliers and controls design variance inflation.
+                        </p>
+                      </div>
                     </div>
+
+                    <div className="space-y-3 bg-white/5 border border-white/5 p-4 rounded-xl">
+                      <h4 className="font-bold text-white font-mono uppercase tracking-wider text-[10px] text-pink-300">Demographics Audit & Representativeness Dashboard:</h4>
+                      <div className="space-y-2 text-[11px]">
+                        <p>
+                          - **Dissimilarity Index ({"$D$"})**: Measures the representation gap.
+                          {"$$D = 0.5 \\sum_{j} |p_j - t_j|$$"}
+                          {"where \\(p_j\\) is the weighted category proportion and \\(t_j\\) is the target census proportion. A dissimilarity index of 0% denotes perfect population representativeness."}
+                        </p>
+                        <p>
+                          - **Bias Correction Score**: Quantifies the percentage of representational bias resolved.
+                          {"$$\\text{Bias Corrected \\%} = \\frac{D_{\\text{before}} - D_{\\text{after}}}{D_{\\text{before}}} \\times 100$$"}
+                        </p>
+                        <p>
+                          - **Excel Audits**: Allows exporting beautiful, print-ready reports ({"`Weighted_Demographics_Audit_Report.xlsx`"}) for stakeholders.
+                        </p>
+                      </div>
+                    </div>
+
                     <button
                       onClick={() => setHubTab('raking')}
                       className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-400 hover:text-indigo-300 transition-colors"
@@ -1317,7 +1348,10 @@ export default function MethodologyHub({ setActiveTab }: MethodologyHubProps) {
                 <h3 className="text-sm font-bold text-white font-mono uppercase tracking-wider">Calibration Targets</h3>
               </div>
               <p className="text-xs text-gray-400 leading-relaxed font-sans">
-                Drag sliders to adjust population census targets. Total sum is fixed at 100 respondents. Click "Execute Raking Step" to watch weights recalibrate iteratively in the table!
+                Drag sliders to adjust population census targets. Total sum is fixed at 100 respondents. Click "Rake Step" to watch weights recalibrate iteratively. 
+              </p>
+              <p className="text-xs text-gray-400 leading-relaxed font-sans mt-2">
+                This simulator demonstrates classical **Multiplicative Raking (IPF)**. In the main application's **Weighting & Calibration** tab, you can select between Multiplicative, Linear (GREG), or Bounded Logit solvers, applied either to drawn samples or custom uploaded fieldwork datasets.
               </p>
 
               <div className="space-y-4">
