@@ -584,7 +584,7 @@ export function rakeWeights(
   // Assign calibrated weights back to output
   const finalSample = workingSample.map(row => {
     const newRow = { ...row };
-    newRow.weight = row._working_weight;
+    newRow[weightCol] = row._working_weight;
     newRow.base_weight = row._original_weight;
     
     // Clean up temporary variables
@@ -809,7 +809,7 @@ export function calibrateLinear(
     const newWeight = baseWeights[i] * (1.0 + dot);
     return {
       ...row,
-      weight: newWeight,
+      [weightCol]: newWeight,
       base_weight: baseWeights[i]
     };
   });

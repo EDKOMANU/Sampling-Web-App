@@ -31,6 +31,7 @@ export function estimateTaylor(
   targetCol: string,
   weightCol = "weight",
   strataCol?: string,
+  clusterCol?: string,
   fpcCol?: string,
   type: "mean" | "total" = "mean"
 ): EstimationResult {
@@ -52,62 +53,76 @@ export function estimateTaylor(
 
   const estimate = type === "mean" ? (sumW > 0 ? weightedSumY / sumW : 0) : weightedSumY;
 
-  // 2. Stratify and calculate linearized variables (z_i)
+  // 2. Stratify, Cluster, and calculate linearized variables (z_i)
   // If strataCol is not provided, treat entire sample as a single stratum
+  // If clusterCol is provided, we must aggregate z_i to the Primary Sampling Unit (PSU) level
   const strataGroups: Record<string, {
-    yList: number[];
-    wList: number[];
-    fpcList: number[];
-    zList: number[];
+    psuMap: Record<string, { zSum: number; fpcList: number[] }>;
   }> = {};
 
-  sample.forEach(row => {
+  sample.forEach((row, rowIndex) => {
     const s = strataCol ? String(row[strataCol]) : "single";
+    const c = clusterCol ? String(row[clusterCol]) : `unit_${rowIndex}`;
     const y = Number(row[targetCol]) || 0;
     const w = Number(row[weightCol]) || 1.0;
     const fpc = fpcCol ? (Number(row[fpcCol]) || 0) : 0;
 
-    // Linearized variable z_i
-    // For Mean: z_i = (w_i / sumW) * (y_i - estimate)
-    // For Total: z_i = w_i * y_i
+    // Linearized variable z_hij
+    // For Mean: z_hij = (w_hij / sumW) * (y_hij - estimate)
+    // For Total: z_hij = w_hij * y_hij
     const z = type === "mean"
       ? (sumW > 0 ? (w / sumW) * (y - estimate) : 0)
       : w * y;
 
     if (!strataGroups[s]) {
-      strataGroups[s] = { yList: [], wList: [], fpcList: [], zList: [] };
+      strataGroups[s] = { psuMap: {} };
     }
 
     const grp = strataGroups[s];
-    grp.yList.push(y);
-    grp.wList.push(w);
-    grp.fpcList.push(fpc);
-    grp.zList.push(z);
+    if (!grp.psuMap[c]) {
+      grp.psuMap[c] = { zSum: 0, fpcList: [] };
+    }
+    
+    // Aggregate to PSU level
+    grp.psuMap[c].zSum += z;
+    grp.psuMap[c].fpcList.push(fpc);
   });
 
   // 3. Compute design-based variance
   // V = sum_h [ (1 - f_h) * (n_h / (n_h - 1)) * sum_i (z_hi - mean_z_h)^2 ]
+  // where n_h is the number of PSUs in stratum h, and z_hi is the PSU sum of z.
   let totalVariance = 0;
 
   Object.keys(strataGroups).forEach(stratum => {
     const grp = strataGroups[stratum];
-    const n_h = grp.zList.length;
+    const psuKeys = Object.keys(grp.psuMap);
+    const n_h = psuKeys.length;
     
     if (n_h <= 1) {
-      // Single PSU in stratum: standard practice in survey package is to either crash or treat variance contribution as 0.
-      // We apply the conservative zero-variance safeguard, which matches R's adjust=certainty or similar.
+      // Single PSU in stratum: standard practice is to treat variance contribution as 0.
       return;
     }
 
-    const meanZ = grp.zList.reduce((a, b) => a + b, 0) / n_h;
+    let stratumZSum = 0;
+    psuKeys.forEach(c => {
+      stratumZSum += grp.psuMap[c].zSum;
+    });
+    const meanZ = stratumZSum / n_h;
     
     let sumSqDiff = 0;
-    for (let i = 0; i < n_h; i++) {
-      sumSqDiff += Math.pow(grp.zList[i] - meanZ, 2);
-    }
+    let avgFpcAccumulator = 0;
+    let fpcCount = 0;
+
+    psuKeys.forEach(c => {
+      sumSqDiff += Math.pow(grp.psuMap[c].zSum - meanZ, 2);
+      grp.psuMap[c].fpcList.forEach(f => {
+        avgFpcAccumulator += f;
+        fpcCount++;
+      });
+    });
 
     // FPC calculation: use the average FPC in the stratum (or 0 if not provided)
-    const avgFpc = grp.fpcList.reduce((a, b) => a + b, 0) / n_h;
+    const avgFpc = fpcCount > 0 ? avgFpcAccumulator / fpcCount : 0;
     const fpcMultiplier = 1 - avgFpc;
 
     const stratumVariance = fpcMultiplier * (n_h / (n_h - 1)) * sumSqDiff;

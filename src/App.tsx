@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import {
@@ -20,7 +20,8 @@ import {
   Moon,
   Sun,
   ShieldCheck,
-  PieChart
+  PieChart,
+  Maximize2
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -59,6 +60,31 @@ ChartJS.register(
   Filler
 );
 
+
+/** Download any Chart.js canvas rendered inside a container by its wrapper id */
+function downloadChartById(wrapperId: string, filename: string) {
+  const container = document.getElementById(wrapperId);
+  if (!container) return;
+  const canvas = container.querySelector('canvas');
+  if (!canvas) return;
+
+  // Create a new canvas with white/dark background + the chart drawn on top
+  const offscreen = document.createElement('canvas');
+  offscreen.width = canvas.width;
+  offscreen.height = canvas.height;
+  const ctx = offscreen.getContext('2d');
+  if (!ctx) return;
+
+  ctx.fillStyle = '#111827'; // dark bg to match app
+  ctx.fillRect(0, 0, offscreen.width, offscreen.height);
+  ctx.drawImage(canvas, 0, 0);
+
+  const link = document.createElement('a');
+  link.download = `${filename}.png`;
+  link.href = offscreen.toDataURL('image/png');
+  link.click();
+}
+
 function App() {
   // Navigation / Tabs
   const [activeTab, setActiveTab] = useState<'dashboard' | 'methodology-hub' | 'samplesize' | 'sampling' | 'weighting' | 'variance' | 'subscription' | 'weighted-analysis'>('dashboard');
@@ -86,6 +112,7 @@ function App() {
     avgProb: number;
     sumWeight: number;
   } | null>(null);
+  const [numClustersToDraw, setNumClustersToDraw] = useState<string>('Auto');
 
   // Weighting & Adjustment States
   const [weightedSample, setWeightedSample] = useState<any[]>([]);
@@ -121,6 +148,7 @@ function App() {
   const [targetEstVar, setTargetEstVar] = useState<string>('');
   const [varianceStrataCol, setVarianceStrataCol] = useState<string>('');
   const [varianceClusterCol, setVarianceClusterCol] = useState<string>('');
+  const [varianceFpcCol, setVarianceFpcCol] = useState<string>('');
   const [taylorResults, setTaylorResults] = useState<any>(null);
   const [bootstrapResults, setBootstrapResults] = useState<any>(null);
   const [bootstrapReps, setBootstrapReps] = useState<number>(100);
@@ -140,11 +168,23 @@ function App() {
   // Strata Allocation UI States
   const [allocTargetN, setAllocTargetN] = useState<number>(500);
   const [syncWithEstimatedSize, setSyncWithEstimatedSize] = useState<boolean>(true);
+  const [manualTargetN, setManualTargetN] = useState<number>(500);
+  const [adjustManualForNonResponse, setAdjustManualForNonResponse] = useState<boolean>(true);
   const [allocMethod, setAllocMethod] = useState<'proportional' | 'equal' | 'neyman'>('proportional');
   const [allocStrataCol, setAllocStrataCol] = useState<string>('');
   const [allocVarCol, setAllocVarCol] = useState<string>('');
   const [manualStrataInput, setManualStrataInput] = useState<string>('Urban: 60000\nRural: 40000');
   const [allocatedStrataList, setAllocatedStrataList] = useState<{ stratum: string; size: number; share: number; allocated: number }[]>([]);
+  const [isAllocationStale, setIsAllocationStale] = useState<boolean>(true);
+
+  const [stratificationDrawCol, setStratificationDrawCol] = useState<string>('');
+
+  // Sync stratificationDrawCol and allocStrataCol
+  useEffect(() => {
+    if (stratificationDrawCol && stratificationDrawCol !== allocStrataCol) {
+      setAllocStrataCol(stratificationDrawCol);
+    }
+  }, [stratificationDrawCol]);
 
   // --- Global Dropdown Freeze Fix ---
   // Native window.alert can lock the UI in Electron. We replace it with an in-app toast notification.
@@ -383,6 +423,18 @@ function App() {
     complexSurveyN = baselineN;
   }
 
+  const inflatedSampleSize = useMemo(() => {
+    if (syncWithEstimatedSize) {
+      return complexSurveyN;
+    } else {
+      if (adjustManualForNonResponse && ssRR > 0) {
+        return Math.ceil(manualTargetN / ssRR);
+      } else {
+        return manualTargetN;
+      }
+    }
+  }, [syncWithEstimatedSize, complexSurveyN, adjustManualForNonResponse, manualTargetN, ssRR]);
+
   // Generate Sample Size vs Margin of Error Graph Data
   const getCurveData = () => {
     if (sizeFormula === 'cochran_mean') {
@@ -551,7 +603,7 @@ function App() {
   };
 
   // Post-Draw Representativeness Stats
-  const getAnalysisStats = () => {
+  const analysisStats = useMemo(() => {
     if (!analysisCol || populationFrame.length === 0 || sampleResult.length === 0) return null;
     
     const popMap: Record<string, number> = {};
@@ -590,14 +642,14 @@ function App() {
         {
           label: 'Drawn Sample Share %',
           data: sampleShares,
-          backgroundColor: 'rgba(16, 185, 129, 0.65)',
-          borderColor: '#10b981',
+          backgroundColor: 'rgba(168, 85, 247, 0.65)',
+          borderColor: '#a855f7',
           borderWidth: 1,
           borderRadius: 4
         }
       ]
     };
-  };
+  }, [analysisCol, populationFrame, sampleResult]);
 
   // --- Run Stratum Allocation ---
   const handleRunAllocation = () => {
@@ -671,6 +723,7 @@ function App() {
     }).sort((a, b) => b.size - a.size);
 
     setAllocatedStrataList(resultList);
+    setIsAllocationStale(false);
   };
 
   // Auto setup allocation strata col if columns changes
@@ -689,20 +742,17 @@ function App() {
     }
   }, [frameColumns]);
 
-  // Sync allocation target with estimated complex survey sample size
+  // Sync allocation target and sample draw size with either synced estimated size or manual target (optionally adjusted for expected non-response)
   useEffect(() => {
-    if (syncWithEstimatedSize && complexSurveyN > 0) {
-      setAllocTargetN(complexSurveyN);
-      setSamplingSampleSize(complexSurveyN);
+    if (inflatedSampleSize > 0) {
+      setAllocTargetN(inflatedSampleSize);
+      setSamplingSampleSize(inflatedSampleSize);
     }
-  }, [complexSurveyN, syncWithEstimatedSize]);
+  }, [inflatedSampleSize]);
 
-  // Run allocation automatically in real-time
+  // Set allocation state to stale when allocation parameters change
   useEffect(() => {
-    const hasStrata = (allocStrataCol && populationFrame.length > 0) || manualStrataInput;
-    if (hasStrata && allocTargetN > 0) {
-      handleRunAllocation();
-    }
+    setIsAllocationStale(true);
   }, [allocTargetN, allocMethod, allocStrataCol, allocVarCol, manualStrataInput, populationFrame]);
 
   // --- Sampling Draw Controller ---
@@ -710,7 +760,18 @@ function App() {
   const [samplingSampleSize, setSamplingSampleSize] = useState<number>(500);
   const [ppsSizeCol, setPpsSizeCol] = useState<string>('');
   const [clusterColName, setClusterColName] = useState<string>('');
-  const [stratificationDrawCol, setStratificationDrawCol] = useState<string>('');
+
+  // Sync cluster variable with the first stage of multistage sampling
+  useEffect(() => {
+    if (clusterColName && multistageStages.length > 0) {
+      setMultistageStages(prev => {
+        if (prev[0].unit === clusterColName) return prev;
+        const updated = [...prev];
+        updated[0] = { ...updated[0], unit: clusterColName };
+        return updated;
+      });
+    }
+  }, [clusterColName]);
 
   const handleDrawSample = () => {
     if (populationFrame.length === 0) {
@@ -743,6 +804,11 @@ function App() {
           return;
         }
 
+        if (isAllocationStale) {
+          alert(`Error: Stratum allocation is out of sync with your current parameters!\n\nPlease go to the "Sample Size & Allocation" tab and click "Compute Stratum Allocation" to recalculate quotas before drawing the sample.`);
+          return;
+        }
+
         // Validate that the stratification column matches
         if (allocStrataCol !== stratificationDrawCol) {
           alert(`Error: Stratification column mismatch!\n\nThe allocation tab uses "${allocStrataCol}", but the draw console uses "${stratificationDrawCol}".\n\nPlease align the stratification columns and click "Run Stratum Allocation" in the "Sample Size & Allocation" tab first.`);
@@ -772,15 +838,42 @@ function App() {
         }
         const res = drawPPS(populationFrame, ppsSizeCol, finalN);
         result = res.sample;
+
+
       } else if (selectedSamplingMethod === 'cluster') {
         if (!clusterColName) {
           alert("Please select a cluster column name.");
           return;
         }
-        // Draw clusters. Suppose we draw clusters of size m
-        const numClustersToDraw = Math.max(2, Math.round(finalN / 50)); // Mock size assumption
-        const res = drawCluster(populationFrame, clusterColName, numClustersToDraw);
-        result = res.sample;
+
+  // Compute actual cluster sizes from the frame
+        const clusterSizes: Record<string, number> = {};
+      populationFrame.forEach(row => {
+      const val = String(row[clusterColName]);
+      clusterSizes[val] = (clusterSizes[val] || 0) + 1;
+      });
+
+      const M = Object.keys(clusterSizes).length; // Total available clusters
+     if (M === 0) {
+        alert("Selected cluster column has no valid values.");
+        return;
+      }
+
+      const avgClusterSize = populationFrame.length / M;
+
+      // Derive number of clusters to draw from target n, capped at M
+      let clustersToDraw = 0;
+      if (numClustersToDraw && numClustersToDraw.toLowerCase() !== 'auto') {
+        clustersToDraw = parseInt(numClustersToDraw) || 2;
+        clustersToDraw = Math.min(M, Math.max(1, clustersToDraw));
+      } else {
+        clustersToDraw = Math.min(M, Math.max(2, Math.round(finalN / avgClusterSize)));
+      }
+
+      const res = drawCluster(populationFrame, clusterColName, clustersToDraw);
+      result = res.sample;
+
+        
       } else if (selectedSamplingMethod === 'multistage') {
         // Validate stages
         const invalid = multistageStages.some(s => !s.unit);
@@ -950,7 +1043,8 @@ function App() {
       targetEstVar, 
       'weight', 
       varianceStrataCol || undefined, 
-      undefined // No FPC
+      varianceClusterCol || undefined,
+      varianceFpcCol || undefined
     );
 
     setTaylorResults(res);
@@ -1009,7 +1103,7 @@ function App() {
 
           // Update replicate weight in matrix
           rakeRes.sample.forEach((row, idx) => {
-            boot.replicateWeights[idx][b] = row.weight; // The final calibrated weight
+            boot.replicateWeights[idx][b] = row._temp_rep_weight; // The final calibrated weight mapped dynamically
           });
         }
       }
@@ -1034,6 +1128,12 @@ function App() {
   useEffect(() => {
     if (frameColumns.includes('Income')) setTargetEstVar('Income');
   }, [frameColumns]);
+
+  // Reset variance results if target variable changes
+  useEffect(() => {
+    setTaylorResults(null);
+    setBootstrapResults(null);
+  }, [targetEstVar]);
 
   // Weight Comparison Graph Data
   const getWeightComparisonChartData = () => {
@@ -1693,9 +1793,32 @@ function App() {
                   {/* Two-Column Visualizations Container */}
                   <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                     {/* MoE Curve Chart */}
-                    <div className="glass-panel border border-white/5 rounded-2xl p-6">
-                      <h3 className="text-sm font-bold text-white mb-4">Sample Size vs. Margin of Error Curve</h3>
-                      <div className="h-64">
+                    <div id="panel-chart-moe-curve" className="glass-panel border border-white/5 rounded-2xl p-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-bold text-white">Sample Size vs. Margin of Error Curve</h3>
+                        <div className="flex items-center gap-2">
+                          <span className="fullscreen-toast text-emerald-400 text-xs font-semibold px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full animate-pulse-subtle mr-2">
+                            ✨ High-Quality Export Mode Active. Press ESC to exit.
+                          </span>
+                          <button
+                            onClick={() => document.getElementById('panel-chart-moe-curve')?.requestFullscreen()}
+                            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/40 text-gray-400 hover:text-indigo-300 transition-all text-[10px] font-semibold"
+                            title="Zoom / Full Screen"
+                          >
+                            <Maximize2 className="h-3 w-3" />
+                            Expand
+                          </button>
+                          <button
+                            onClick={() => downloadChartById('chart-moe-curve', 'SampleSize_vs_MoE_Curve')}
+                            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/40 text-gray-400 hover:text-indigo-300 transition-all text-[10px] font-semibold"
+                            title="Download chart as PNG (Use Expand for Higher Quality)"
+                          >
+                            <Download className="h-3 w-3" />
+                            PNG
+                          </button>
+                        </div>
+                      </div>
+                      <div id="chart-moe-curve" className="h-64">
                         <Line
                           data={sampleSizeVsMoEData}
                           options={{
@@ -1712,9 +1835,32 @@ function App() {
                     </div>
 
                     {/* Formula Comparison Chart */}
-                    <div className="glass-panel border border-white/5 rounded-2xl p-6">
-                      <h3 className="text-sm font-bold text-white mb-4">Methodology Comparison</h3>
-                      <div className="h-64">
+                    <div id="panel-chart-methodology-comparison" className="glass-panel border border-white/5 rounded-2xl p-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-bold text-white">Methodology Comparison</h3>
+                        <div className="flex items-center gap-2">
+                          <span className="fullscreen-toast text-emerald-400 text-xs font-semibold px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full animate-pulse-subtle mr-2">
+                            ✨ High-Quality Export Mode Active. Press ESC to exit.
+                          </span>
+                          <button
+                            onClick={() => document.getElementById('panel-chart-methodology-comparison')?.requestFullscreen()}
+                            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/40 text-gray-400 hover:text-indigo-300 transition-all text-[10px] font-semibold"
+                            title="Zoom / Full Screen"
+                          >
+                            <Maximize2 className="h-3 w-3" />
+                            Expand
+                          </button>
+                          <button
+                            onClick={() => downloadChartById('chart-methodology-comparison', 'Methodology_Comparison')}
+                            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/40 text-gray-400 hover:text-indigo-300 transition-all text-[10px] font-semibold"
+                            title="Download chart as PNG (Use Expand for Higher Quality)"
+                          >
+                            <Download className="h-3 w-3" />
+                            PNG
+                          </button>
+                        </div>
+                      </div>
+                      <div id="chart-methodology-comparison" className="h-64">
                         <Bar
                           data={getFormulaComparisonData()}
                           options={{
@@ -1765,41 +1911,54 @@ function App() {
                     <div className="space-y-3">
                       <div className="flex items-center justify-between">
                         <label className="block text-xs font-semibold text-gray-400">Target Sample Size to Allocate (n)</label>
-                        {syncWithEstimatedSize && (
+                        {(syncWithEstimatedSize || (!syncWithEstimatedSize && adjustManualForNonResponse)) && (
                           <span className="text-[10px] font-bold text-pink-400 bg-pink-500/10 px-2 py-0.5 rounded border border-pink-500/20 font-mono uppercase tracking-wider animate-pulse">
                             Design Adjusted
                           </span>
                         )}
                       </div>
                       
-                      <div className="flex items-center gap-2 bg-indigo-500/5 border border-indigo-500/10 p-2.5 rounded-xl">
-                        <input
-                          type="checkbox"
-                          id="syncSampleCalc"
-                          checked={syncWithEstimatedSize}
-                          onChange={(e) => {
-                            const checked = e.target.checked;
-                            setSyncWithEstimatedSize(checked);
-                            if (checked) {
-                              setAllocTargetN(complexSurveyN);
-                              setSamplingSampleSize(complexSurveyN);
-                            }
-                          }}
-                          className="rounded text-indigo-600 focus:ring-indigo-500 bg-gray-900 border-white/10"
-                        />
-                        <label htmlFor="syncSampleCalc" className="text-[11px] font-semibold text-gray-300 cursor-pointer select-none">
-                          Sync with Sample Size Calculator ({complexSurveyN})
-                        </label>
+                      <div className="flex flex-col gap-2 bg-indigo-500/5 border border-indigo-500/10 p-2.5 rounded-xl space-y-1">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="syncSampleCalc"
+                            checked={syncWithEstimatedSize}
+                            onChange={(e) => {
+                              setSyncWithEstimatedSize(e.target.checked);
+                            }}
+                            className="rounded text-indigo-600 focus:ring-indigo-500 bg-gray-900 border-white/10"
+                          />
+                          <label htmlFor="syncSampleCalc" className="text-[11px] font-semibold text-gray-300 cursor-pointer select-none">
+                            Sync with Sample Size Calculator ({complexSurveyN})
+                          </label>
+                        </div>
+
+                        {!syncWithEstimatedSize && (
+                          <div className="flex items-center gap-2 pt-1.5 border-t border-white/5">
+                            <input
+                              type="checkbox"
+                              id="adjustManualForNonResponse"
+                              checked={adjustManualForNonResponse}
+                              onChange={(e) => {
+                                setAdjustManualForNonResponse(e.target.checked);
+                              }}
+                              className="rounded text-pink-600 focus:ring-pink-500 bg-gray-900 border-white/10"
+                            />
+                            <label htmlFor="adjustManualForNonResponse" className="text-[11px] font-semibold text-gray-300 cursor-pointer select-none">
+                              Adjust for Expected Non-Response ({Math.round(ssRR * 100)}%)
+                            </label>
+                          </div>
+                        )}
                       </div>
 
                       <input
                         type="number"
-                        value={allocTargetN}
+                        value={syncWithEstimatedSize ? complexSurveyN : manualTargetN}
                         disabled={syncWithEstimatedSize}
                         onChange={(e) => {
                           const val = parseInt(e.target.value) || 0;
-                          setAllocTargetN(val);
-                          setSamplingSampleSize(val);
+                          setManualTargetN(val);
                         }}
                         className={`w-full bg-gray-900 border rounded-lg px-3 py-2 text-sm focus:outline-none transition-all ${
                           syncWithEstimatedSize 
@@ -1807,10 +1966,20 @@ function App() {
                             : 'border-white/10 text-white focus:border-indigo-500'
                         }`}
                       />
-                      {syncWithEstimatedSize && (
+                      {syncWithEstimatedSize ? (
                         <p className="text-[10px] text-gray-500 leading-normal">
                           Automatically locked to the estimated required sample size, factoring in the chosen Cochran/Slovin formula, a **Design Effect (Deff) of {ssDeff}**, and an **expected response rate of {Math.round(ssRR * 100)}%**.
                         </p>
+                      ) : (
+                        adjustManualForNonResponse ? (
+                          <p className="text-[10px] text-pink-400 font-medium leading-normal">
+                            ✨ Target: <strong>{manualTargetN.toLocaleString()}</strong> completed surveys. With an expected response rate of <strong>{Math.round(ssRR * 100)}%</strong>, the system will allocate and draw <strong>{inflatedSampleSize.toLocaleString()}</strong> cases to ensure your target is met.
+                          </p>
+                        ) : (
+                          <p className="text-[10px] text-gray-400 leading-normal">
+                            Target: <strong>{manualTargetN.toLocaleString()}</strong> surveys. Allocating exactly <strong>{manualTargetN.toLocaleString()}</strong> cases without adjusting for expected non-response.
+                          </p>
+                        )
                       )}
                     </div>
 
@@ -1840,6 +2009,18 @@ function App() {
                             className="w-full bg-gray-900 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
                           >
                             <option value="">-- Select Stratum Column --</option>
+                            {frameColumns.map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1">Cluster Variable Column (Optional)</label>
+                          <select
+                            value={clusterColName}
+                            onChange={(e) => setClusterColName(e.target.value)}
+                            className="w-full bg-gray-900 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+                          >
+                            <option value="">-- Select Cluster Column --</option>
                             {frameColumns.map(c => <option key={c} value={c}>{c}</option>)}
                           </select>
                         </div>
@@ -1874,15 +2055,43 @@ function App() {
 
                     <button
                       onClick={handleRunAllocation}
-                      className="w-full py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 hover-lift text-white font-medium text-xs transition-all flex items-center justify-center gap-2"
+                      className={`w-full py-2.5 rounded-lg font-medium text-xs transition-all flex items-center justify-center gap-2 hover-lift border ${
+                        isAllocationStale
+                          ? "bg-gradient-to-r from-pink-500 via-purple-600 to-indigo-600 hover:from-pink-400 hover:to-indigo-500 text-white shadow-[0_0_15px_rgba(168,85,247,0.35)] border-pink-400/40 animate-pulse-subtle"
+                          : "bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500/20"
+                      }`}
                     >
-                      <Play className="h-3.5 w-3.5" />
-                      Run Strata Allocation
+                      {isAllocationStale ? (
+                        <>
+                          <Play className="h-3.5 w-3.5 animate-bounce-horizontal" />
+                          <span>Compute Stratum Allocation</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-300" />
+                          <span>Allocation Calculated</span>
+                        </>
+                      )}
                     </button>
                   </div>
 
                   {/* Allocation output results table */}
-                  <div className="md:col-span-2 overflow-x-auto rounded-xl border border-white/5 max-h-[350px]">
+                  <div className="md:col-span-2 space-y-4">
+                    {isAllocationStale && allocatedStrataList.length > 0 && (
+                      <div className="p-3 rounded-xl bg-gradient-to-r from-amber-500/10 to-pink-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-center justify-between gap-3 animate-slide-up">
+                        <div className="flex items-center gap-2">
+                          <span className="flex h-2 w-2 rounded-full bg-amber-500 animate-ping shrink-0" />
+                          <span><strong>Allocation settings modified.</strong> The quotas below are out of sync with your current inputs.</span>
+                        </div>
+                        <button
+                          onClick={handleRunAllocation}
+                          className="px-3 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/30 font-semibold cursor-pointer transition-all hover-lift shrink-0"
+                        >
+                          Recalculate Now
+                        </button>
+                      </div>
+                    )}
+                    <div className="overflow-x-auto rounded-xl border border-white/5 max-h-[350px]">
                     <table className="w-full text-left border-collapse text-xs">
                       <thead>
                         <tr className="bg-white/5 text-gray-300 font-mono border-b border-white/10 sticky top-0">
@@ -1925,8 +2134,8 @@ function App() {
                         </tfoot>
                       )}
                     </table>
+                    </div>
                   </div>
-
                 </div>
               </div>
             </div>
@@ -1964,7 +2173,7 @@ function App() {
                   <div>
                     <div className="flex items-center justify-between mb-1">
                       <label className="block text-xs font-semibold text-gray-400">Target Sample Size to Draw (n)</label>
-                      {syncWithEstimatedSize && (
+                      {(syncWithEstimatedSize || (!syncWithEstimatedSize && adjustManualForNonResponse)) && (
                         <span className="text-[9px] font-bold text-pink-400 bg-pink-500/10 px-2 py-0.5 rounded border border-pink-500/20 font-mono uppercase tracking-wider animate-pulse">
                           Design Adjusted
                         </span>
@@ -1972,12 +2181,11 @@ function App() {
                     </div>
                     <input
                       type="number"
-                      value={samplingSampleSize}
+                      value={syncWithEstimatedSize ? complexSurveyN : manualTargetN}
                       disabled={syncWithEstimatedSize}
                       onChange={(e) => {
                         const val = parseInt(e.target.value) || 0;
-                        setSamplingSampleSize(val);
-                        setAllocTargetN(val);
+                        setManualTargetN(val);
                       }}
                       className={`w-full bg-gray-900 border rounded-lg px-3 py-2 text-sm focus:outline-none transition-all ${
                         syncWithEstimatedSize 
@@ -1985,10 +2193,20 @@ function App() {
                           : 'border-white/10 text-white focus:border-indigo-500'
                       }`}
                     />
-                    {syncWithEstimatedSize && (
+                    {syncWithEstimatedSize ? (
                       <p className="text-[10px] text-gray-500 mt-1">
                         Locked to complex survey size ({complexSurveyN}). Change calculator settings in Tab 2 to adjust.
                       </p>
+                    ) : (
+                      adjustManualForNonResponse ? (
+                        <p className="text-[10px] text-pink-400 font-medium leading-normal mt-1">
+                          ✨ Drawing <strong>{inflatedSampleSize.toLocaleString()}</strong> cases to achieve <strong>{manualTargetN.toLocaleString()}</strong> completed surveys (adjusted for <strong>{Math.round(ssRR * 100)}%</strong> response rate).
+                        </p>
+                      ) : (
+                        <p className="text-[10px] text-gray-400 leading-normal mt-1">
+                          Drawing exactly <strong>{manualTargetN.toLocaleString()}</strong> cases without adjusting for expected non-response.
+                        </p>
+                      )
                     )}
                   </div>
 
@@ -2026,16 +2244,34 @@ function App() {
                   )}
 
                   {selectedSamplingMethod === 'cluster' && (
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-400 mb-1">Cluster Identifier Column</label>
-                      <select
-                        value={clusterColName}
-                        onChange={(e) => setClusterColName(e.target.value)}
-                        className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
-                      >
-                        <option value="">-- Select Cluster Column --</option>
-                        {frameColumns.map(c => <option key={c} value={c}>{c}</option>)}
-                      </select>
+                    <div className="space-y-4">
+                      <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-xs text-amber-200/90 leading-relaxed mb-2">
+                        <strong className="text-amber-400">Note on Single-Stage Cluster:</strong> By definition, this method surveys <strong>ALL units</strong> within the selected clusters. If your clusters are very large, your final sample size will easily exceed the target (n). 
+                        <br/><br/>
+                        <em>Want to draw a specific number of units from each cluster instead? Switch the methodology above to <strong>Multistage Hierarchical Sampling</strong>.</em>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-400 mb-1">Cluster Identifier Column</label>
+                        <select
+                          value={clusterColName}
+                          onChange={(e) => setClusterColName(e.target.value)}
+                          className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                        >
+                          <option value="">-- Select Cluster Column --</option>
+                          {frameColumns.map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-400 mb-1">Number of Clusters to Draw (m)</label>
+                        <input
+                          type="text"
+                          value={numClustersToDraw}
+                          onChange={(e) => setNumClustersToDraw(e.target.value)}
+                          placeholder="e.g. 5 or Auto"
+                          className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                        />
+                        <p className="text-[10px] text-gray-500 mt-1">Leave as "Auto" to determine based on average cluster size and target n.</p>
+                      </div>
                     </div>
                   )}
 
@@ -2074,7 +2310,7 @@ function App() {
                             value={stg.unit}
                             onChange={(e) => {
                               const updated = [...multistageStages];
-                              updated[sIdx].unit = e.target.value;
+                              updated[sIdx] = { ...updated[sIdx], unit: e.target.value };
                               setMultistageStages(updated);
                             }}
                             className="w-full bg-gray-900 border border-white/10 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none"
@@ -2083,31 +2319,69 @@ function App() {
                             {frameColumns.map(c => <option key={c} value={c}>{c}</option>)}
                           </select>
 
-                          <div className="grid grid-cols-2 gap-2">
-                            <select
-                              value={stg.method}
-                              onChange={(e) => {
-                                const updated = [...multistageStages];
-                                updated[sIdx].method = e.target.value as any;
-                                setMultistageStages(updated);
-                              }}
-                              className="w-full bg-gray-900 border border-white/10 rounded px-2.5 py-1.5 text-[10px] text-white focus:outline-none"
-                            >
-                              <option value="Simple Random Sampling">SRS</option>
-                              <option value="Systematic Sampling">Systematic</option>
-                              <option value="PPS">PPS Size</option>
-                            </select>
-                            <input
-                              type="text"
-                              value={stg.alloc_val}
-                              placeholder="Quota value"
-                              onChange={(e) => {
-                                const updated = [...multistageStages];
-                                updated[sIdx].alloc_val = e.target.value;
-                                setMultistageStages(updated);
-                              }}
-                              className="w-full bg-gray-900 border border-white/10 rounded px-2.5 py-1.5 text-[10px] text-white focus:outline-none"
-                            />
+                          <div className="grid grid-cols-3 gap-2 mt-2">
+                            <div>
+                              <label className="block text-[8px] text-indigo-300/80 font-mono uppercase mb-0.5">Method</label>
+                              <select
+                                value={stg.method}
+                                onChange={(e) => {
+                                  const updated = [...multistageStages];
+                                  updated[sIdx] = { ...updated[sIdx], method: e.target.value as any };
+                                  setMultistageStages(updated);
+                                }}
+                                className="w-full bg-gray-900 border border-white/10 rounded px-2 py-1 text-[10px] text-white focus:outline-none focus:border-indigo-500"
+                              >
+                                <option value="Simple Random Sampling">SRS</option>
+                                <option value="Systematic Sampling">Systematic</option>
+                                <option value="PPS">PPS Size</option>
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block text-[8px] text-indigo-300/80 font-mono uppercase mb-0.5">Allocation Type</label>
+                              <select
+                                value={stg.alloc_type}
+                                onChange={(e) => {
+                                  const updated = [...multistageStages];
+                                  const val = e.target.value as any;
+                                  let newAllocVal = '1';
+                                  if (val === 'Auto-distribute Target Sample Size') {
+                                    newAllocVal = 'Auto';
+                                  } else if (val === 'Proportional Allocation') {
+                                    newAllocVal = '0.5';
+                                  }
+                                  updated[sIdx] = { ...updated[sIdx], alloc_type: val, alloc_val: newAllocVal };
+                                  setMultistageStages(updated);
+                                }}
+                                className="w-full bg-gray-900 border border-white/10 rounded px-2 py-1 text-[10px] text-white focus:outline-none focus:border-indigo-500"
+                              >
+                                <option value="Fixed Numbers">Fixed Quota</option>
+                                <option value="Proportional Allocation">Proportional</option>
+                                <option value="Auto-distribute Target Sample Size">Auto-distribute Target Size</option>
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block text-[8px] text-indigo-300/80 font-mono uppercase mb-0.5">
+                                {stg.alloc_type === 'Auto-distribute Target Sample Size' ? 'Target Size' : 'Value / Ratio'}
+                              </label>
+                              <input
+                                type="text"
+                                value={stg.alloc_val}
+                                disabled={stg.alloc_type === 'Auto-distribute Target Sample Size'}
+                                placeholder={stg.alloc_type === 'Auto-distribute Target Sample Size' ? 'Auto' : 'e.g. 10'}
+                                onChange={(e) => {
+                                  const updated = [...multistageStages];
+                                  updated[sIdx] = { ...updated[sIdx], alloc_val: e.target.value };
+                                  setMultistageStages(updated);
+                                }}
+                                className={`w-full bg-gray-900 border rounded px-2 py-1 text-[10px] text-white focus:outline-none transition-all ${
+                                  stg.alloc_type === 'Auto-distribute Target Sample Size'
+                                    ? 'border-indigo-500/10 text-indigo-400 bg-indigo-500/5 cursor-not-allowed font-bold'
+                                    : 'border-white/10 focus:border-indigo-500'
+                                }`}
+                              />
+                            </div>
                           </div>
                         </div>
                       ))}
@@ -2157,23 +2431,32 @@ function App() {
                   <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                     
                     {/* Selected Sample Grid View */}
-                    <div className="glass-panel border border-white/5 rounded-2xl p-6">
-                      <div className="flex justify-between items-center mb-4">
-                        <div>
-                          <h3 className="text-sm font-bold text-white uppercase tracking-wider font-mono">Drawn Sample Output View</h3>
-                          <p className="text-[10px] text-gray-400">Displaying selected rows with their selection weights</p>
+                      <div className="glass-panel border border-white/5 rounded-2xl p-6">
+                        <div className="flex justify-between items-center mb-4">
+                          <div>
+                            <h3 className="text-sm font-bold text-white uppercase tracking-wider font-mono">Drawn Sample Output View</h3>
+                            <p className="text-[10px] text-gray-400">Displaying selected rows with their selection weights</p>
+                          </div>
+                          
+                          {sampleResult.length > 0 && (
+                            <button
+                              onClick={handleExportSample}
+                              className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white hover-lift text-[10px] font-semibold flex items-center gap-1 transition-all"
+                            >
+                              <Download className="h-3 w-3" />
+                              Export (Excel)
+                            </button>
+                          )}
                         </div>
-                        
-                        {sampleResult.length > 0 && (
-                          <button
-                            onClick={handleExportSample}
-                            className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white hover-lift text-[10px] font-semibold flex items-center gap-1 transition-all"
-                          >
-                            <Download className="h-3 w-3" />
-                            Export (Excel)
-                          </button>
+
+                        {sampleResult.length > 100 && (
+                          <div className="bg-amber-500/10 border border-amber-500/20 text-amber-400 p-2.5 rounded-lg mb-4 text-xs flex items-center gap-2">
+                            <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                            </svg>
+                            <p><strong>Display Truncated:</strong> Showing the first 100 drawn samples for browser performance. The full sample contains {sampleResult.length.toLocaleString()} units. Please export to Excel to view the entire dataset.</p>
+                          </div>
                         )}
-                      </div>
 
                       <div className="overflow-x-auto rounded-xl border border-white/5 max-h-[350px]">
                         <table className="w-full text-left border-collapse text-xs">
@@ -2214,32 +2497,58 @@ function App() {
                     </div>
 
                     {/* Representativeness Analysis Dashboard */}
-                    <div className="glass-panel border border-white/5 rounded-2xl p-6 flex flex-col justify-between">
+                    <div id="panel-chart-representativeness" className="glass-panel border border-white/5 rounded-2xl p-6 flex flex-col justify-between">
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <h3 className="text-sm font-bold text-white uppercase tracking-wider font-mono">Representativeness Analysis</h3>
                           
-                          {/* Category Selector */}
-                          <select
-                            value={analysisCol}
-                            onChange={(e) => setAnalysisCol(e.target.value)}
-                            className="bg-gray-900 border border-white/10 rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-indigo-500"
-                          >
-                            <option value="">-- Select Variable for Analysis --</option>
-                            {frameColumns.filter(c => c !== 'ID' && !c.includes('FPC') && c !== 'weight' && c !== 'prob' && c !== 'Responded').map(c => (
-                              <option key={c} value={c}>{c}</option>
-                            ))}
-                          </select>
+                          <div className="flex items-center gap-2">
+                            {/* Expand and Download button */}
+                            {sampleResult.length > 0 && analysisStats && (
+                              <div className="flex items-center gap-2">
+                                <span className="fullscreen-toast text-emerald-400 text-xs font-semibold px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full animate-pulse-subtle mr-2">
+                                  ✨ High-Quality Export Mode Active. Press ESC to exit.
+                                </span>
+                                <button
+                                  onClick={() => document.getElementById('panel-chart-representativeness')?.requestFullscreen()}
+                                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/40 text-gray-400 hover:text-indigo-300 transition-all text-[10px] font-semibold"
+                                  title="Zoom / Full Screen"
+                                >
+                                  <Maximize2 className="h-3 w-3" />
+                                  Expand
+                                </button>
+                                <button
+                                  onClick={() => downloadChartById('chart-representativeness', 'Representativeness_' + (analysisCol || 'analysis'))}
+                                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/40 text-gray-400 hover:text-indigo-300 transition-all text-[10px] font-semibold"
+                                  title="Download chart as PNG (Use Expand for Higher Quality)"
+                                >
+                                  <Download className="h-3 w-3" />
+                                  PNG
+                                </button>
+                              </div>
+                            )}
+                            {/* Category Selector */}
+                            <select
+                              value={analysisCol}
+                              onChange={(e) => setAnalysisCol(e.target.value)}
+                              className="bg-gray-900 border border-white/10 rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-indigo-500"
+                            >
+                              <option value="">-- Select Variable for Analysis --</option>
+                              {frameColumns.filter(c => c !== 'ID' && !c.includes('FPC') && c !== 'weight' && c !== 'prob' && c !== 'Responded').map(c => (
+                                <option key={c} value={c}>{c}</option>
+                              ))}
+                            </select>
+                          </div>
                         </div>
                         <p className="text-[10px] text-gray-400 mb-4">
                           Comparing the percentage distribution of <strong>{analysisCol || 'selected variable'}</strong> in the Universe (Census) vs. the drawn sample to verify balance.
                         </p>
                       </div>
 
-                      {sampleResult.length > 0 && getAnalysisStats() ? (
-                        <div className="h-64 mt-2">
+                      {sampleResult.length > 0 && analysisStats ? (
+                        <div id="chart-representativeness" className="h-64 mt-2">
                           <Bar
-                            data={getAnalysisStats()!}
+                            data={analysisStats}
                             options={{
                               responsive: true,
                               maintainAspectRatio: false,
@@ -2626,7 +2935,7 @@ function App() {
                                     onChange={(e) => setTrimLower(parseFloat(e.target.value) || 0.1)}
                                     className="w-full bg-gray-900 border border-white/10 rounded px-2 py-1 text-white focus:outline-none"
                                   />
-                                </div>
+                                 </div>
                                 <div>
                                   <label className="block text-gray-500 mb-1">Upper Cap ({trimUpper}x)</label>
                                   <input
@@ -2636,8 +2945,8 @@ function App() {
                                     onChange={(e) => setTrimUpper(parseFloat(e.target.value) || 1.5)}
                                     className="w-full bg-gray-900 border border-white/10 rounded px-2 py-1 text-white focus:outline-none"
                                   />
+                                 </div>
                                 </div>
-                              </div>
                             )}
                           </div>
                         )}
@@ -2705,9 +3014,32 @@ function App() {
 
                   {/* Weight dispersion chart */}
                   {weightedSample.length > 0 && (
-                    <div className="glass-panel border border-white/5 rounded-2xl p-6">
-                      <h3 className="text-sm font-bold text-white mb-4">Survey Weight Distribution Shift</h3>
-                      <div className="h-64">
+                    <div id="panel-chart-weight-distribution" className="glass-panel border border-white/5 rounded-2xl p-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-bold text-white">Survey Weight Distribution Shift</h3>
+                        <div className="flex items-center gap-2">
+                          <span className="fullscreen-toast text-emerald-400 text-xs font-semibold px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full animate-pulse-subtle mr-2">
+                            ✨ High-Quality Export Mode Active. Press ESC to exit.
+                          </span>
+                          <button
+                            onClick={() => document.getElementById('panel-chart-weight-distribution')?.requestFullscreen()}
+                            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/40 text-gray-400 hover:text-indigo-300 transition-all text-[10px] font-semibold"
+                            title="Zoom / Full Screen"
+                          >
+                            <Maximize2 className="h-3 w-3" />
+                            Expand
+                          </button>
+                          <button
+                            onClick={() => downloadChartById('chart-weight-distribution', 'Survey_Weight_Distribution')}
+                            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/40 text-gray-400 hover:text-indigo-300 transition-all text-[10px] font-semibold"
+                            title="Download chart as PNG (Use Expand for Higher Quality)"
+                          >
+                            <Download className="h-3 w-3" />
+                            PNG
+                          </button>
+                        </div>
+                      </div>
+                      <div id="chart-weight-distribution" className="h-64">
                         <Line
                           data={getWeightComparisonChartData()}
                           options={{
@@ -3047,6 +3379,29 @@ function App() {
                 XLSX.writeFile(workbook, "Weighted_Demographics_Audit_Report.xlsx");
               };
 
+              const buildAuditChartData = (col: string) => {
+                const audit = getDemographicsAudit(col);
+                const isColNumeric = audit.levelsSummary.length > 0 && audit.levelsSummary[0].level.startsWith('[');
+                const limit = isColNumeric ? 12 : 8;
+                const categories = audit.levelsSummary.map(r => r.level).slice(0, limit);
+                const unweightedData = categories.map(cat => audit.levelsSummary.find(r => r.level === cat)?.uwShare || 0);
+                const weightedData = categories.map(cat => audit.levelsSummary.find(r => r.level === cat)?.wShare || 0);
+                const targetData = categories.map(cat => {
+                  const match = audit.levelsSummary.find(r => r.level === cat);
+                  return match && match.targetShare !== null ? match.targetShare : null;
+                });
+                const datasets: { label: string; data: number[]; backgroundColor: string; borderColor: string; borderWidth: number; borderRadius: number }[] = [
+                  { label: 'Unweighted Share %', data: unweightedData, backgroundColor: 'rgba(168, 85, 247, 0.65)', borderColor: '#a855f7', borderWidth: 1, borderRadius: 4 },
+                  { label: 'Calibrated Share %', data: weightedData, backgroundColor: 'rgba(99, 102, 241, 0.65)', borderColor: '#6366f1', borderWidth: 1, borderRadius: 4 }
+                ];
+                if (audit.hasTargets) {
+                  datasets.push({ label: 'Census Target %', data: targetData.map(v => v === null ? 0 : v), backgroundColor: 'rgba(236, 72, 153, 0.65)', borderColor: '#ec4899', borderWidth: 1, borderRadius: 4 });
+                }
+                return { audit, chartData: { labels: categories, datasets } };
+              };
+
+              const auditDataList = selectedAnalysisVars.map(col => buildAuditChartData(col));
+
               return (
                 <div className="space-y-6 text-left">
                   {/* Header Section */}
@@ -3197,75 +3552,22 @@ function App() {
                           </div>
                         </div>
                       ) : (
-                        selectedAnalysisVars.map(col => {
-                          const audit = getDemographicsAudit(col);
-                          
-                          // Prepare Chart.js dataset
-                          const isColNumeric = audit.levelsSummary.length > 0 && audit.levelsSummary[0].level.startsWith('[');
-                          const limit = isColNumeric ? 12 : 8; // cap at 8 for categorical to fit nicely, 12 for numeric bins
-                          const categories = audit.levelsSummary.map(r => r.level).slice(0, limit);
-                          const unweightedData = categories.map(cat => {
-                            return audit.levelsSummary.find(r => r.level === cat)?.uwShare || 0;
-                          });
-                          const weightedData = categories.map(cat => {
-                            return audit.levelsSummary.find(r => r.level === cat)?.wShare || 0;
-                          });
-                          const targetData = categories.map(cat => {
-                            const match = audit.levelsSummary.find(r => r.level === cat);
-                            return match && match.targetShare !== null ? match.targetShare : null;
-                          });
-                          
-                          const datasets = [
-                            {
-                              label: 'Unweighted Share %',
-                              data: unweightedData,
-                              backgroundColor: 'rgba(168, 85, 247, 0.65)',
-                              borderColor: '#a855f7',
-                              borderWidth: 1,
-                              borderRadius: 4
-                            },
-                            {
-                              label: 'Calibrated Share %',
-                              data: weightedData,
-                              backgroundColor: 'rgba(99, 102, 241, 0.65)',
-                              borderColor: '#6366f1',
-                              borderWidth: 1,
-                              borderRadius: 4
-                            }
-                          ];
-                          
-                          if (audit.hasTargets) {
-                            datasets.push({
-                              label: 'Census Target %',
-                              data: targetData.map(v => v === null ? 0 : v),
-                              backgroundColor: 'rgba(236, 72, 153, 0.65)',
-                              borderColor: '#ec4899',
-                              borderWidth: 1,
-                              borderRadius: 4
-                            });
-                          }
-                          
-                          const chartData = {
-                            labels: categories,
-                            datasets
-                          };
-                          
-                          return (
-                            <div key={col} className="glass-panel border border-white/5 rounded-2xl p-6 space-y-6">
+                        auditDataList.map((auditEntry, _idx) => (
+                            <div key={selectedAnalysisVars[_idx]} id={'panel-chart-audit-' + selectedAnalysisVars[_idx]} className="glass-panel border border-white/5 rounded-2xl p-6 space-y-6">
                               
                               {/* Variable Header info */}
                               <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-white/5 pb-3 gap-2">
                                 <div className="space-y-0.5">
                                   <h3 className="font-bold text-white text-base flex items-center gap-2">
-                                    {col}
-                                    {rakingMargins.some(m => m.column === col) && (
+                                    {selectedAnalysisVars[_idx]}
+                                    {rakingMargins.some(m => m.column === selectedAnalysisVars[_idx]) && (
                                       <span className="text-[10px] bg-pink-500/10 border border-pink-500/20 text-pink-300 px-2 py-0.5 rounded-full font-semibold">
                                         Raking Margin
                                       </span>
                                     )}
                                   </h3>
                                   <p className="text-[10px] text-gray-400">
-                                    Audited across {audit.levelsSummary.length} distinct categories
+                                    Audited across {auditEntry.audit.levelsSummary.length} distinct categories
                                   </p>
                                 </div>
                                 
@@ -3273,22 +3575,22 @@ function App() {
                                   <div className="text-right">
                                     <p className="text-gray-400 text-[10px]">Representation Discrepancy (D)</p>
                                     <div className="font-semibold text-white mt-0.5">
-                                      {audit.hasTargets ? (
+                                      {auditEntry.audit.hasTargets ? (
                                         <span>
-                                          Before: <strong className="text-pink-400">{audit.dissimilarityBefore.toFixed(2)}%</strong> → After: <strong className="text-emerald-400">{audit.dissimilarityAfter.toFixed(2)}%</strong>
+                                          Before: <strong className="text-pink-400">{auditEntry.audit.dissimilarityBefore.toFixed(2)}%</strong> → After: <strong className="text-emerald-400">{auditEntry.audit.dissimilarityAfter.toFixed(2)}%</strong>
                                         </span>
                                       ) : (
                                         <span>
-                                          Weighted Shift: <strong className="text-indigo-300">{audit.dissimilarityAfter.toFixed(2)}%</strong>
+                                          Weighted Shift: <strong className="text-indigo-300">{auditEntry.audit.dissimilarityAfter.toFixed(2)}%</strong>
                                         </span>
                                       )}
                                     </div>
                                   </div>
                                   
-                                  {audit.biasReduction !== null && (
+                                  {auditEntry.audit.biasReduction !== null && (
                                     <div className="bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-1 rounded-xl text-center">
                                       <p className="text-[9px] text-emerald-400 font-semibold tracking-wide uppercase">Bias Resolved</p>
-                                      <p className="font-bold text-emerald-300 text-sm mt-0.5">{audit.biasReduction.toFixed(1)}%</p>
+                                      <p className="font-bold text-emerald-300 text-sm mt-0.5">{auditEntry.audit.biasReduction.toFixed(1)}%</p>
                                     </div>
                                   )}
                                 </div>
@@ -3299,8 +3601,33 @@ function App() {
                                 
                                 {/* Chart */}
                                 <div className="xl:col-span-5 h-64">
+                                  <div className="flex items-center justify-between mb-1">
+                                    <span className="text-[10px] text-gray-500 font-mono">Distribution</span>
+                                    <div className="flex items-center gap-2">
+                                      <span className="fullscreen-toast text-emerald-400 text-xs font-semibold px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full animate-pulse-subtle mr-2">
+                                        ✨ High-Quality Export Mode Active. Press ESC to exit.
+                                      </span>
+                                      <button
+                                        onClick={() => document.getElementById('panel-chart-audit-' + selectedAnalysisVars[_idx])?.requestFullscreen()}
+                                        className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/40 text-gray-400 hover:text-indigo-300 transition-all text-[9px] font-semibold"
+                                        title="Zoom / Full Screen"
+                                      >
+                                        <Maximize2 className="h-2.5 w-2.5" />
+                                        Expand
+                                      </button>
+                                      <button
+                                        onClick={() => downloadChartById('chart-audit-' + selectedAnalysisVars[_idx], 'Calibration_Audit_' + selectedAnalysisVars[_idx])}
+                                        className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/40 text-gray-400 hover:text-indigo-300 transition-all text-[9px] font-semibold"
+                                        title="Download chart as PNG (Use Expand for Higher Quality)"
+                                      >
+                                        <Download className="h-2.5 w-2.5" />
+                                        PNG
+                                      </button>
+                                    </div>
+                                  </div>
+                                  <div id={'chart-audit-' + selectedAnalysisVars[_idx]} className="h-56">
                                   <Bar
-                                    data={chartData}
+                                    data={auditEntry.chartData}
                                     options={{
                                       responsive: true,
                                       maintainAspectRatio: false,
@@ -3324,6 +3651,7 @@ function App() {
                                       }
                                     }}
                                   />
+                                 </div>
                                 </div>
                                 
                                 {/* Audit Table */}
@@ -3339,7 +3667,7 @@ function App() {
                                       </tr>
                                     </thead>
                                     <tbody className="divide-y divide-white/5 text-gray-300">
-                                      {audit.levelsSummary.map(row => (
+                                      {auditEntry.audit.levelsSummary.map(row => (
                                         <tr key={row.level} className="hover:bg-white/5">
                                           <td className="py-2 pr-2 font-medium text-white max-w-[120px] truncate">{row.level}</td>
                                           <td className="py-2 text-center text-purple-300 font-mono">
@@ -3370,13 +3698,13 @@ function App() {
                                 
                               </div>
                             </div>
-                          );
-                        })
+                        ))
                       )}
                     </div>
                     
                   </div>
                 </div>
+
               );
             })()
           )}
@@ -3392,7 +3720,22 @@ function App() {
                 <p className="text-xs text-gray-400">Calculate design-corrected Standard Errors, Coefficients of Variation, and Design Effects (Deff)</p>
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {weightedSample.length === 0 ? (
+                <div className="flex flex-col items-center justify-center p-12 glass-panel border border-white/5 rounded-2xl text-center space-y-4">
+                  <Scale className="h-12 w-12 text-indigo-400/50" />
+                  <h3 className="text-xl font-bold text-white">No Calibrated Weights Available</h3>
+                  <p className="text-sm text-gray-400 max-w-md">
+                    You must first calculate sample weights and run the calibration engine in the <strong>Weighting</strong> tab before running variance estimation.
+                  </p>
+                  <button
+                    onClick={() => setActiveTab('weighting')}
+                    className="mt-4 px-6 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-semibold text-white transition-all hover-lift"
+                  >
+                    Go to Weighting
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 
                 {/* Form Controls */}
                 <div className="glass-panel border border-white/5 rounded-2xl p-6 space-y-4">
@@ -3408,7 +3751,7 @@ function App() {
                       className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
                     >
                       <option value="">-- Select Target Variable --</option>
-                      {frameColumns.map(c => <option key={c} value={c}>{c}</option>)}
+                      {weightedSample.length > 0 && Object.keys(weightedSample[0]).map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
                   </div>
 
@@ -3420,19 +3763,31 @@ function App() {
                       className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
                     >
                       <option value="">-- Select Stratum Column --</option>
-                      {frameColumns.map(c => <option key={c} value={c}>{c}</option>)}
+                      {weightedSample.length > 0 && Object.keys(weightedSample[0]).map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-gray-400 mb-1">Cluster Column (Optional, Bootstrap Only)</label>
+                    <label className="block text-xs font-semibold text-gray-400 mb-1">Cluster Column (Optional)</label>
                     <select
                       value={varianceClusterCol}
                       onChange={(e) => setVarianceClusterCol(e.target.value)}
                       className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
                     >
                       <option value="">-- Select Cluster Column --</option>
-                      {frameColumns.map(c => <option key={c} value={c}>{c}</option>)}
+                      {weightedSample.length > 0 && Object.keys(weightedSample[0]).map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-400 mb-1">FPC Column (Optional, Taylor Only)</label>
+                    <select
+                      value={varianceFpcCol}
+                      onChange={(e) => setVarianceFpcCol(e.target.value)}
+                      className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
+                    >
+                      <option value="">-- Select FPC Column --</option>
+                      {weightedSample.length > 0 && Object.keys(weightedSample[0]).map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
                   </div>
 
@@ -3591,12 +3946,12 @@ function App() {
 
 
                 </div>
-
               </div>
-            </div>
-          )}
+            )}
+          </div>
+        )}
 
-          {/* TAB 7: SUBSCRIPTION & LICENSES */}
+        {/* TAB 7: SUBSCRIPTION & LICENSES */}
           {activeTab === 'subscription' && (
             <div className="space-y-6 text-left">
               <div className="text-left">

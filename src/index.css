@@ -113,3 +113,63 @@ body {
 .animate-slide-up {
   animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
+
+/* Subtle pulse scale animation */
+@keyframes pulseSubtle {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.95;
+    transform: scale(1.02);
+  }
+}
+
+.animate-pulse-subtle {
+  animation: pulseSubtle 2s infinite ease-in-out;
+}
+
+/* Horizontal slide arrows for interaction guides */
+@keyframes bounceHorizontal {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(3px);
+  }
+}
+
+.animate-bounce-horizontal {
+  animation: bounceHorizontal 1s infinite ease-in-out;
+}
+
+/* Fullscreen Chart Styling */
+:fullscreen {
+  background-color: #0b0f19 !important;
+  padding: 2rem !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: auto;
+}
+
+:fullscreen > div[id^="chart-"] {
+  flex-grow: 1 !important;
+  height: auto !important;
+  min-height: 80vh !important;
+}
+
+:fullscreen .glass-panel {
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* Toast message only visible in fullscreen */
+.fullscreen-toast {
+  display: none !important;
+}
+
+:fullscreen .fullscreen-toast {
+  display: inline-flex !important;
+}

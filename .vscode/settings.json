@@ -1,0 +1,14 @@
+{
+  "files.watcherExclude": {
+    "**/dist-electron-v3/**": true,
+    "**/dist-electron-built/**": true,
+    "**/dist/**": true,
+    "**/node_modules/**": true
+  },
+  "search.exclude": {
+    "**/dist-electron-v3/**": true,
+    "**/dist-electron-built/**": true,
+    "**/dist/**": true,
+    "**/node_modules/**": true
+  }
+}

@@ -311,7 +311,10 @@ export function drawCluster(frame: any[], clusterCol: string, m: number): Sample
   const clusterKeys = Object.keys(clusters);
   const M = clusterKeys.length;
   if (M === 0) throw new Error("No clusters found.");
-  if (m > M) throw new Error(`Requested clusters (m=${m}) exceeds available clusters (M=${M}).`);
+  if (m > M) {
+    // Cap at M (certainty selection)
+    m = M;
+  }
 
   // SRS select m cluster keys
   const drawnClusterRes = drawSRS(clusterKeys.map(k => ({ ID: k })), m, "srswor");

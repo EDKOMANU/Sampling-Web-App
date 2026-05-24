@@ -18,7 +18,7 @@ interface MethodologyHubProps {
 }
 
 export default function MethodologyHub({ setActiveTab }: MethodologyHubProps) {
-  const [hubTab, setHubTab] = useState<'timeline' | 'formulas' | 'grid' | 'deff' | 'raking' | 'quiz'>('timeline');
+  const [hubTab, setHubTab] = useState<'timeline' | 'formulas' | 'grid' | 'deff' | 'raking' | 'quiz' | 'multistage'>('timeline');
 
   // Slide/Timeline Accordion state
   const [activeStep, setActiveStep] = useState<number>(0);
@@ -472,6 +472,12 @@ export default function MethodologyHub({ setActiveTab }: MethodologyHubProps) {
           >
             Methodology Quiz
           </button>
+          <button
+            onClick={() => setHubTab('multistage')}
+            className={`px-3 py-1.5 rounded-lg transition-all font-medium ${hubTab === 'multistage' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}
+          >
+            Multistage Engine
+          </button>
         </div>
       </div>
 
@@ -581,6 +587,16 @@ export default function MethodologyHub({ setActiveTab }: MethodologyHubProps) {
                         <p className="text-[10px] text-gray-400 mt-2">Neyman optimal allocation draws larger samples from strata with higher internal standard deviation (variance), maximizing overall precision.</p>
                       </div>
                     </div>
+                    
+                    <div className="bg-white/5 border border-white/5 p-4 rounded-xl space-y-2 mt-4">
+                      <h4 className="font-bold text-white font-mono uppercase tracking-wider text-[10px] text-amber-300">New Feature: Automatic Quota Adjustments</h4>
+                      <p className="text-[11px] text-gray-300">
+                        When manually setting target survey sizes, Mr_Ed' Sampling Suite now gives you the option to automatically **adjust strata allocations by expected non-response rates**.
+                        <br/><br/>
+                        For example, if you input a manual target of **1,000**, and the estimated response rate is **85%**, the engine will automatically upscale the overall target to **~1,176** before pushing the quotas through the proportional allocation engine. This ensures your final *achieved* sample meets statistical viability constraints.
+                      </p>
+                    </div>
+
                     <button
                       onClick={() => setHubTab('formulas')}
                       className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-400 hover:text-indigo-300 transition-colors"
@@ -689,6 +705,7 @@ export default function MethodologyHub({ setActiveTab }: MethodologyHubProps) {
                       <div className="bg-white/5 border border-white/5 p-4 rounded-xl">
                         <h4 className="font-bold text-white font-mono uppercase tracking-wider text-[10px] text-indigo-300">taylor series linearization</h4>
                         <p className="text-[11px] mt-1 text-gray-300">Linearizes non-linear estimators (e.g. ratio means) to compute exact stratified design-based variances: V = sum_h [ (n_h / (n_h - 1)) * sum_i (z_hi - z_bar_h)^2 ].</p>
+                        <div className="mt-2 text-[10px] text-emerald-400 font-mono">Now Supports Explicit FPC Shrinkage Factors!</div>
                       </div>
                       <div className="bg-white/5 border border-white/5 p-4 rounded-xl">
                         <h4 className="font-bold text-white font-mono uppercase tracking-wider text-[10px] text-pink-300 font-semibold">rao-wu cluster bootstrap</h4>
@@ -1657,6 +1674,96 @@ export default function MethodologyHub({ setActiveTab }: MethodologyHubProps) {
                 </div>
               );
             })()}
+
+          </div>
+        )}
+
+        {/* SUB-TAB 7: MULTISTAGE SAMPLING ENGINE LOGIC */}
+        {hubTab === 'multistage' && (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            
+            <div className="glass-panel border border-white/5 rounded-2xl p-8 relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-8 opacity-5">
+                <Layers className="h-48 w-48 text-indigo-400" />
+              </div>
+              
+              <h3 className="text-xl font-bold text-white mb-2 relative z-10 flex items-center gap-2">
+                <Layers className="h-6 w-6 text-indigo-400" />
+                Multistage Hierarchical Engine Logic
+              </h3>
+              <p className="text-sm text-gray-400 max-w-3xl relative z-10">
+                A deep dive into how parameters, recursive groupings, and selection probabilities are mechanically processed when you execute a complex hierarchical sample in the Sampling Console.
+              </p>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mt-8 relative z-10">
+                
+                {/* How Data is Handled */}
+                <div className="space-y-5">
+                  <h4 className="font-bold text-white uppercase tracking-wider text-xs border-b border-white/10 pb-2">1. Recursive Data Grouping</h4>
+                  <p className="text-xs text-gray-300 leading-relaxed">
+                    For every stage you define (e.g., <strong>State ➔ County ➔ Household</strong>), the engine dynamically isolates data by the <strong>parent stages</strong> that preceded it.
+                  </p>
+                  <p className="text-xs text-gray-300 leading-relaxed">
+                    When the engine processes the "County" stage, it does not look at the entire population of counties at once. Instead, it creates isolated groupings strictly within each "State" selected in Stage 1. Unselected parent groups are mathematically pruned from memory, increasing performance.
+                  </p>
+
+                  <h4 className="font-bold text-white uppercase tracking-wider text-xs border-b border-white/10 pb-2 mt-6">2. Probability & Weight Math</h4>
+                  <p className="text-xs text-gray-300 leading-relaxed">
+                    As primary sampling units (PSUs) are drawn at each stage, the engine calculates the mathematical selection probability for that specific draw:
+                  </p>
+                  <ul className="list-disc pl-4 space-y-2 text-xs text-gray-300">
+                    <li><strong>PPS (Probability Proportional to Size):</strong> Units with more underlying records receive a higher chance of selection.</li>
+                    <li><strong>Simple Random Sampling:</strong> All unique units receive equal selection probability.</li>
+                  </ul>
+                  <div className="bg-indigo-500/10 border border-indigo-500/20 p-3 rounded-xl mt-3">
+                    <p className="font-mono text-[10px] text-indigo-300 text-center">
+                      Cumulative Probability (P_total) = P_Stage1 × P_Stage2 × P_Stage3
+                    </p>
+                    <p className="font-mono text-[10px] text-pink-300 text-center mt-1">
+                      Final Base Weight = 1 / P_total
+                    </p>
+                  </div>
+                </div>
+
+                {/* How Parameters are Handled */}
+                <div className="space-y-5">
+                  <h4 className="font-bold text-white uppercase tracking-wider text-xs border-b border-white/10 pb-2">3. Parameter Allocation Strategies</h4>
+                  <p className="text-xs text-gray-300 leading-relaxed">
+                    Once a parent group is isolated, the engine looks at your <strong>Allocation Strategy</strong> parameter to decide exactly how many unique units to pull:
+                  </p>
+                  
+                  <div className="space-y-3">
+                    <div className="bg-white/5 border border-white/5 p-3 rounded-lg">
+                      <strong className="text-xs text-white">Fixed Numbers</strong>
+                      <p className="text-[11px] text-gray-400 mt-1">Draws exactly the absolute number you specify. (e.g., Exactly 2 counties drawn per selected State).</p>
+                    </div>
+                    
+                    <div className="bg-white/5 border border-white/5 p-3 rounded-lg">
+                      <strong className="text-xs text-white">Proportional Allocation</strong>
+                      <p className="text-[11px] text-gray-400 mt-1">Treats your parameter as a fraction (e.g., 0.1). It draws exactly 10% of the available unique units inside the group.</p>
+                    </div>
+
+                    <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg relative overflow-hidden">
+                      <div className="absolute top-0 right-0 bg-emerald-500 text-white text-[9px] font-bold px-2 py-0.5 rounded-bl-lg">
+                        SECRET TO TARGET MATCHING
+                      </div>
+                      <strong className="text-xs text-emerald-300">Auto-distribute Target Sample Size</strong>
+                      <p className="text-[11px] text-gray-300 mt-1">
+                        Use this on your <strong>final stage</strong>. The engine ignores manual values. Instead, it looks at your global Sample Size parameter (n) calculated in Tab 2, and divides it perfectly evenly across all surviving parent groups:
+                      </p>
+                      <p className="font-mono text-[10px] text-emerald-400 text-center mt-2 bg-black/20 py-1 rounded">
+                        Draw N = Global Target (n) / Surviving Parent Groups
+                      </p>
+                      <p className="text-[10px] text-gray-400 mt-2">
+                        This mathematically guarantees the sum of all finally drawn records equals your intended target size!
+                      </p>
+                    </div>
+                  </div>
+                  
+                </div>
+
+              </div>
+            </div>
 
           </div>
         )}
