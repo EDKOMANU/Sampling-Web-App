@@ -18,7 +18,10 @@
     "@tailwindcss/vite": "^4.3.0",
     "chart.js": "^4.5.1",
     "framer-motion": "^12.39.0",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.17.0",
     "lucide-react": "^1.16.0",
+    "marked": "^18.0.4",
     "papaparse": "^5.5.3",
     "react": "^19.2.6",
     "react-chartjs-2": "^5.3.1",
@@ -60,12 +63,13 @@
       "target": [
         {
           "target": "zip",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.png"
     },
-
     "mac": {
       "target": "dmg",
       "icon": "build/icon.png"
