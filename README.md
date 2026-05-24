@@ -102,7 +102,7 @@ Make sure you have [Node.js](https://nodejs.org) (v18 or higher) installed.
 
 ### Step 1: Clone the Codebase
 ```bash
-git clone https://github.com/YOUR_USERNAME/mr-eds-sampling-suite.git
+git clone https://github.com/EDKOMANU/Sampling-Web-App.git
 cd "mr-eds-sampling-suite"
 ```
 
@@ -123,23 +123,6 @@ To compile and package the app for web deployment:
 npm run build
 ```
 This generates a highly optimized, minified static site bundle inside the `/dist` directory.
-
----
-
-## 🚀 Instant Web Deployment
-
-To host this application online completely for free:
-
-### Deploy with Vercel CLI (Takes 2 minutes)
-1. Install the Vercel command line interface globally:
-   ```bash
-   npm install -g vercel
-   ```
-2. Run the deployment command in the root folder:
-   ```bash
-   vercel
-   ```
-3. Follow the interactive CLI prompts. Your application will be live at `https://mr-eds-sampling-suite.vercel.app`!
 
 ---
 
