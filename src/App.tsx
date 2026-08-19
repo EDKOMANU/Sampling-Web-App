@@ -47,6 +47,8 @@ const DEMO_FRAME_SEED = 'MRED-DEMO-FRAME-V1';
 import type { StageConfig } from './utils/sampling';
 import { calculateWeightSummary, adjustWeightingClass, adjustResponsePropensity, calibrateWeights } from './utils/weighting';
 import type { RakingMargin, CalibrationWarning } from './utils/weighting';
+import type { Diagnostic, LoggedDiagnostic } from './utils/diagnostics';
+import { hasBlockingError, dedupeByCode } from './utils/diagnostics';
 import { estimateTaylor, generateBootstrapWeights, estimateBootstrap } from './utils/variance';
 import type { LonelyPsuPolicy } from './utils/variance';
 
@@ -206,19 +208,65 @@ function App() {
     }
   }, [stratificationDrawCol]);
 
-  // --- Global Dropdown Freeze Fix ---
-  // Native window.alert can lock the UI in Electron. We replace it with an in-app toast notification.
-  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  // --- Diagnostics channel ---
+  // Every methodological finding the engines produce surfaces here. Errors persist
+  // until dismissed; informational messages expire. The full list is retained for the
+  // eventual Survey Methodology Report, which is why nothing is discarded on dismiss.
+  const [diagnostics, setDiagnostics] = useState<LoggedDiagnostic[]>([]);
+  const [diagnosticLog, setDiagnosticLog] = useState<LoggedDiagnostic[]>([]);
+  const [showLog, setShowLog] = useState<boolean>(false);
+  const diagnosticSeq = React.useRef(0);
 
-  useEffect(() => {
-    let timeoutId: ReturnType<typeof setTimeout>;
-    window.alert = (msg) => {
-      setToastMsg(String(msg));
-      clearTimeout(timeoutId);
-      timeoutId = setTimeout(() => setToastMsg(null), 4500);
-    };
-    return () => clearTimeout(timeoutId);
+  const pushDiagnostics = React.useCallback((items: Diagnostic[], source: string) => {
+    if (items.length === 0) return;
+    const at = new Date().toISOString();
+    const logged: LoggedDiagnostic[] = items.map(d => ({
+      ...d,
+      id: ++diagnosticSeq.current,
+      at,
+      source,
+    }));
+    // Replace the visible set rather than appending: each run reports its own findings,
+    // and stacking two runs' diagnostics invites reading a stale one as current.
+    setDiagnostics(logged);
+    // The log is append-only. It is the audit trail.
+    setDiagnosticLog(prev => [...prev, ...logged]);
   }, []);
+
+  // Native window.alert blocks the renderer in Electron. Route it through the same
+  // channel so simple status messages and engine findings behave consistently.
+  useEffect(() => {
+    window.alert = (msg) => {
+      const text = String(msg);
+      const at = new Date().toISOString();
+      // Engine findings arrive through pushDiagnostics with an explicit severity; what
+      // reaches here is UI-level status text, so the classification only has to separate
+      // "you must do something first" from an ordinary note.
+      //
+      // Deliberately NOT matching a bare "error": in a survey application the phrase
+      // "standard error" appears in perfectly ordinary advisory text, and matching it
+      // stamped informational messages as failures.
+      const looksLikeFailure = /\b(cannot|could not|failed|unable to|must (?:be|select|upload)|is empty|no .{1,24} (?:found|available))\b/i.test(text);
+      const entry: LoggedDiagnostic = {
+        severity: looksLikeFailure ? 'error' : 'info',
+        code: 'MESSAGE',
+        message: text,
+        id: ++diagnosticSeq.current,
+        at,
+        source: 'App',
+      };
+      setDiagnostics([entry]);
+      setDiagnosticLog(prev => [...prev, entry]);
+    };
+  }, []);
+
+  // Informational messages clear themselves; errors and warnings do not.
+  useEffect(() => {
+    if (diagnostics.length === 0) return;
+    if (diagnostics.some(d => d.severity === 'error' || d.severity === 'warning')) return;
+    const t = setTimeout(() => setDiagnostics([]), 4500);
+    return () => clearTimeout(t);
+  }, [diagnostics]);
 
   // Multi-stage sampling state
   const [multistageStages, setMultistageStages] = useState<StageConfig[]>([
@@ -997,12 +1045,8 @@ Seed: ${seedInfo.canonical}
       if (nonResponseMethod === 'class' && responseCol && weightClassCol) {
         const adjustRes = adjustWeightingClass(currentSample, weightClassCol, responseCol, 'weight');
         nrWarnings = adjustRes.warnings || [];
-        const nrBlockers = nrWarnings.filter(w => w.severity === 'error');
-        if (nrBlockers.length > 0) {
-          alert(
-            'Non-response adjustment failed — weights were not applied.\n\n'
-            + nrBlockers.map(w => `• ${w.message}`).join('\n\n')
-          );
+        if (hasBlockingError(nrWarnings)) {
+          pushDiagnostics(nrWarnings, 'Weighting · non-response');
           return;
         }
         currentSample = adjustRes.respondents;
@@ -1059,10 +1103,7 @@ Seed: ${seedInfo.canonical}
           setRakingResult(rakeRes);
           setTaylorResults(null);
           setBootstrapResults(null);
-          alert(
-            'Calibration failed — weights were not applied.\n\n'
-            + blockers.map(w => `• ${w.message}`).join('\n\n')
-          );
+          pushDiagnostics([...nrWarnings, ...rakeRes.warnings], 'Weighting · calibration');
           return;
         }
 
@@ -1085,11 +1126,11 @@ Seed: ${seedInfo.canonical}
       setTaylorResults(null);
       setBootstrapResults(null);
 
-      alert(
+      pushDiagnostics(
         advisories.length > 0
-          ? `Weights computed, with ${advisories.length} advisory note${advisories.length === 1 ? '' : 's'}:\n\n`
-            + advisories.map(w => `• ${w.message}`).join('\n\n')
-          : "Weighting & calibration engine successfully computed weights!"
+          ? advisories
+          : [{ severity: 'success', code: 'WEIGHTS_COMPUTED', message: 'Weights computed. No methodological issues detected.' }],
+        'Weighting'
       );
     } catch (e: any) {
       alert(`Weighting Error: ${e.message}`);
@@ -1128,12 +1169,18 @@ Seed: ${seedInfo.canonical}
 
     // Surface methodological problems rather than quietly returning a plausible number.
     const problems = res.warnings || [];
-    if (problems.length > 0) {
-      alert(
-        `Estimate computed, with ${problems.length} note${problems.length === 1 ? '' : 's'} on the finite population correction:\n\n`
-        + problems.map(w => `${w.severity === 'error' ? '[NOT APPLIED] ' : ''}${w.message}`).join('\n\n')
-      );
-    }
+    pushDiagnostics(
+      problems.length > 0
+        ? problems
+        : [{
+            severity: 'success',
+            code: 'ESTIMATE_COMPUTED',
+            message: `Estimate computed on ${res.df} degrees of freedom (t = ${
+              Number.isFinite(res.criticalValue) ? res.criticalValue.toFixed(3) : '--'
+            }). No methodological issues detected.`
+          }],
+      'Variance · Taylor'
+    );
   };
 
   const handleCalculateBootstrapVariance = async () => {
@@ -1296,17 +1343,103 @@ Seed: ${seedInfo.canonical}
   return (
     <div className={`min-h-screen bg-gradient-mesh transition-colors duration-300 font-sans`}>
       
-      {/* Global Toast Notification */}
-      {toastMsg && (
-        <div className="fixed top-24 left-1/2 transform -translate-x-1/2 z-[100] animate-in fade-in slide-in-from-top-4 duration-300">
-          <div className="bg-gray-900/95 border border-indigo-500/40 shadow-2xl shadow-indigo-900/30 backdrop-blur-xl rounded-2xl px-6 py-4 flex items-center gap-4 min-w-[300px] max-w-lg">
-            <div className="text-indigo-400 bg-indigo-500/10 p-2 rounded-full border border-indigo-500/20">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+      {/* Diagnostics panel. Errors and warnings persist; info expires. */}
+      {diagnostics.length > 0 && (() => {
+        const shown = dedupeByCode(diagnostics);
+        const worst = shown[0]?.severity ?? 'info';
+        const tone: Record<string, { ring: string; chip: string; label: string }> = {
+          error:   { ring: 'border-rose-500/40  shadow-rose-900/30',    chip: 'bg-rose-500/10 text-rose-300 border-rose-500/20',       label: 'Not applied' },
+          warning: { ring: 'border-amber-500/40 shadow-amber-900/30',   chip: 'bg-amber-500/10 text-amber-300 border-amber-500/20',    label: 'Check this' },
+          info:    { ring: 'border-indigo-500/40 shadow-indigo-900/30', chip: 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20', label: 'Note' },
+          success: { ring: 'border-emerald-500/40 shadow-emerald-900/30', chip: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20', label: 'Done' },
+        };
+        const t = tone[worst] || tone.info;
+        return (
+          <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[100] w-[min(92vw,44rem)] animate-in fade-in slide-in-from-top-4 duration-300">
+            <div className={`bg-gray-900/95 border ${t.ring} shadow-2xl backdrop-blur-xl rounded-2xl overflow-hidden`}>
+              <div className="flex items-center justify-between px-5 py-2.5 border-b border-white/10">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-gray-400">
+                  {shown.length} finding{shown.length === 1 ? '' : 's'}
+                  {diagnostics[0]?.source ? ` · ${diagnostics[0].source}` : ''}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowLog(true)}
+                    className="text-[10px] font-mono px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-gray-300 transition-colors"
+                  >
+                    Full log ({diagnosticLog.length})
+                  </button>
+                  <button
+                    onClick={() => setDiagnostics([])}
+                    aria-label="Dismiss findings"
+                    className="text-gray-500 hover:text-white transition-colors bg-white/5 hover:bg-white/10 p-1.5 rounded-full"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
+                  </button>
+                </div>
+              </div>
+              <div className="max-h-[50vh] overflow-y-auto divide-y divide-white/5">
+                {shown.map((d, i) => {
+                  const dt = tone[d.severity] || tone.info;
+                  return (
+                    <div key={`${d.code}-${i}`} className="px-5 py-3.5 flex gap-3 items-start">
+                      <span className={`shrink-0 mt-0.5 text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${dt.chip}`}>
+                        {dt.label}
+                      </span>
+                      <div className="min-w-0">
+                        <p className="text-sm text-gray-100 leading-relaxed">{d.message}</p>
+                        {(d.code !== 'MESSAGE' || d.count > 1) && (
+                          <p className="text-[10px] font-mono text-gray-500 mt-1">
+                            {d.code !== 'MESSAGE' ? d.code : ''}
+                            {d.count > 1 ? ` · ${d.count}x` : ''}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-            <p className="text-sm font-medium text-white flex-1">{toastMsg}</p>
-            <button onClick={() => setToastMsg(null)} className="text-gray-500 hover:text-white transition-colors bg-white/5 hover:bg-white/10 p-1.5 rounded-full">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
-            </button>
+          </div>
+        );
+      })()}
+
+      {/* Full diagnostic log — the audit trail behind every reported number. */}
+      {showLog && (
+        <div className="fixed inset-0 z-[110] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6" onClick={() => setShowLog(false)}>
+          <div className="bg-gray-900 border border-white/10 rounded-2xl w-[min(94vw,56rem)] max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+              <div>
+                <h3 className="text-sm font-bold text-white uppercase tracking-wider font-mono">Methodology Log</h3>
+                <p className="text-[11px] text-gray-400 mt-0.5">
+                  Every decision this session made on your behalf, in order. This is the record a published estimate rests on.
+                </p>
+              </div>
+              <button onClick={() => setShowLog(false)} className="text-gray-500 hover:text-white bg-white/5 hover:bg-white/10 p-2 rounded-full">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
+              </button>
+            </div>
+            <div className="overflow-y-auto divide-y divide-white/5">
+              {diagnosticLog.length === 0 ? (
+                <p className="px-6 py-8 text-sm text-gray-400">Nothing recorded yet.</p>
+              ) : diagnosticLog.map(d => (
+                <div key={d.id} className="px-6 py-3 flex gap-4 items-start">
+                  <span className="shrink-0 text-[10px] font-mono text-gray-500 w-36">
+                    {d.at.replace('T', ' ').slice(0, 19)}
+                  </span>
+                  <span className={`shrink-0 text-[10px] font-mono uppercase w-20 ${
+                    d.severity === 'error' ? 'text-rose-400'
+                    : d.severity === 'warning' ? 'text-amber-400'
+                    : 'text-gray-400'}`}>
+                    {d.severity}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[13px] text-gray-200 leading-relaxed">{d.message}</p>
+                    <p className="text-[10px] font-mono text-gray-500 mt-0.5">{d.source} · {d.code}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}

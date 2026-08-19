@@ -180,9 +180,25 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
   - Lint 107 -> 110 errors, all `any[]` on the new signatures, consistent with
     every sibling. Tracked in T25.
 
-- [ ] **T12. Structured warning channel**
-  - Partly built: `CalibrationWarning` (T3) and `VarianceWarning` (T8) exist and
-    are surfaced. T12 unifies them and replaces the remaining `alert()` calls.
+- [x] **T12. Structured warning channel** — DONE 2026-08-19
+  - New `src/utils/diagnostics.ts`: one `Diagnostic {severity, code, message}`
+    vocabulary. `CalibrationWarning` and `VarianceWarning` are now aliases of it,
+    so one channel carries every engine's output.
+  - Severities: `error | warning | info | success`. **Errors and warnings do not
+    auto-dismiss**; only info expires. The previous toast cleared after 4.5s and
+    held one message, so a calibration run emitting three findings showed one of
+    them, briefly.
+  - `dedupeByCode` collapses repeats with a count — the bootstrap re-calibrates
+    once per replicate and would otherwise emit the same finding B times.
+  - Panel sorts worst-first, shows the code, and keeps an **append-only log** with
+    timestamp and source. That log is what T16/T17 render the methodology report
+    from; it is reachable from the panel ("Full log (n)").
+  - The 28 remaining `alert()` calls are simple input prompts. `window.alert` is
+    routed into the same channel rather than converting each into ceremony.
+  - Accept: VERIFIED in the running app, not just by typecheck. Found and fixed a
+    real bug that way: the alert severity heuristic matched a bare `error`, so the
+    phrase "standard error" — ubiquitous here — stamped advisory notes as failures.
+    Confirmed all three cases classify correctly after the fix.
   - Files: engines + `src/App.tsx`
   - Problem: 43 blocking `alert()` calls; engines have comments saying "a warning
     would be captured here" with no mechanism.

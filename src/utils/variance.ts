@@ -12,14 +12,12 @@
  */
 
 import type { SeedInput } from './random';
+import type { Diagnostic } from './diagnostics';
 import { criticalValue } from './distributions';
 import { deriveStream } from './random';
 
-export interface VarianceWarning {
-  severity: 'error' | 'warning';
-  code: string;
-  message: string;
-}
+/** Variance diagnostics share the application-wide Diagnostic vocabulary. */
+export type VarianceWarning = Diagnostic;
 
 /**
  * How to treat a stratum containing a single PSU ("lonely PSU"), where the deviation

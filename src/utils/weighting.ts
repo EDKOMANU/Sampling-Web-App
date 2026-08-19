@@ -1,3 +1,5 @@
+import type { Diagnostic } from './diagnostics';
+
 /**
  * Official Statistics Sampling & Weighting System - Weighting & Calibration Engine
  * Written in pure TypeScript with absolute mathematical precision and robust safeguards.
@@ -430,11 +432,11 @@ export interface RakingMargin {
   targets: Record<string, number>; // Marginal target totals (e.g. { "18-34": 45000, "35-54": 55000, "55+": 40000 })
 }
 
-export interface CalibrationWarning {
-  severity: 'error' | 'warning';
-  code: string;
-  message: string;
-}
+/**
+ * Calibration diagnostics share the application-wide Diagnostic vocabulary, so the UI
+ * and the methodology log treat every engine's output identically.
+ */
+export type CalibrationWarning = Diagnostic;
 
 /** Tunable thresholds for the calibration and non-response pre-flight checks. */
 export interface PreflightOptions {

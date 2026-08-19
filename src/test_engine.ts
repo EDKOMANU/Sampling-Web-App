@@ -8,6 +8,7 @@ import { drawSRS, drawStratified } from './utils/sampling';
 import { adjustWeightingClass, rakeWeights, preflightCalibration } from './utils/weighting';
 import { estimateTaylor, generateBootstrapWeights } from './utils/variance';
 import { createRng } from './utils/random';
+import { hasBlockingError, dedupeByCode, bySeverity } from './utils/diagnostics';
 
 function assert(condition: boolean, message: string) {
   if (!condition) {
@@ -446,6 +447,47 @@ const bootWeights = generateBootstrapWeights(raked.sample, 50, "weight", "stratu
 console.log(`- Rao-Wu Stratified Bootstrap: Generated ${bootWeights.replicateWeights[0].length} replicate weights for all ${bootWeights.replicateWeights.length} rows`);
 assert(bootWeights.replicateWeights.length === raked.sample.length, "Bootstrap weight mapping row count error");
 assert(bootWeights.replicateWeights[0].length === 50, "Bootstrap replicate column size error");
+
+// --- DIAGNOSTICS CHANNEL (T12) ---
+console.log("\n[5/5] Testing Diagnostics Channel...");
+
+assert(hasBlockingError([{ severity: "warning", code: "A", message: "m" }]) === false,
+  "a warning alone must not block");
+assert(hasBlockingError([{ severity: "warning", code: "A", message: "m" },
+                         { severity: "error", code: "B", message: "m" }]) === true,
+  "any error must block");
+
+// The bootstrap re-calibrates once per replicate, so an unbounded channel would emit
+// the same finding B times over. Repeats collapse to one entry carrying a count.
+const repeated = Array.from({ length: 100 }, () => ({
+  severity: "warning" as const, code: "TARGET_CATEGORY_COLLAPSED", message: "same"
+}));
+const collapsed = dedupeByCode(repeated);
+assert(collapsed.length === 1, "repeats of one code must collapse to a single entry");
+assert(collapsed[0].count === 100, "the collapsed entry must retain the occurrence count");
+console.log(`- Dedupe: 100 repeats of one code -> ${collapsed.length} entry (x${collapsed[0].count})`);
+
+// Worst-first ordering, so what invalidates the result is never below the fold.
+const mixedDiag = [
+  { severity: "info" as const, code: "I", message: "i" },
+  { severity: "error" as const, code: "E", message: "e" },
+  { severity: "warning" as const, code: "W", message: "w" },
+];
+const ordered = [...mixedDiag].sort(bySeverity);
+assert(ordered[0].severity === "error" && ordered[1].severity === "warning",
+  "diagnostics must sort worst-first");
+console.log("- Ordering: error before warning before info");
+
+// Both engines must speak the same vocabulary, so one channel can carry both.
+const calWarn = rakeWeights(pfSample, [
+  { column: "age", targets: { "18-34": 50000, "35+": 50000 } },
+  { column: "region", targets: { North: 49000, South: 49000 } },
+], "weight", 50, 0.001).warnings;
+const varWarn = estimateTaylor(
+  [{ id: 1, stratum: "A", v: 10, weight: 5 }], "v", "weight", "stratum").warnings;
+assert(hasBlockingError([...calWarn, ...varWarn]),
+  "calibration and variance diagnostics must be interchangeable in one channel");
+console.log("- Unified vocabulary: calibration and variance findings mix in one channel");
 
 console.log("\n==========================================");
 console.log("ALL STATISTICAL ENGINE TESTS COMPLETED SUCCESSFULLY!");
