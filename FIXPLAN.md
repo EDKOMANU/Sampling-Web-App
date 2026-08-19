@@ -191,6 +191,16 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
 - [ ] **T23. Move the bootstrap off the main thread with typed-array replicate storage**
   - Given the Electron-first decision, prefer Node `worker_threads` or an Electron
     utility process over a Web Worker — more headroom, and it can stream from disk.
+- [ ] **T25. Clear the lint backlog (111 problems, 107 errors)**
+  - Mostly `@typescript-eslint/no-explicit-any` from the `any[]` row types used for
+    arbitrary CSV columns — needs a real `SampleRow`/`FrameRow` type, which pairs
+    naturally with T13's split of `App.tsx`.
+  - Genuine finds worth fixing sooner: `loss` computed but never used in the
+    logistic solver (`weighting.ts:200`) — it should drive the convergence check,
+    see T20; `totalTargetDeviations`/`numEvaluations` dead in `rakeWeights`
+    (`weighting.ts:533-534`); `vSrs` useless assignment in `variance.ts`.
+  - CI runs lint as an advisory (non-blocking) job so the count stays visible.
+
 - [ ] **T24. Stream large frame ingestion on the Node side**
   - The browser FileReader path materialises the whole file in renderer memory, which
     is exactly the crash the desktop target is meant to avoid. Also lets the `xlsx`

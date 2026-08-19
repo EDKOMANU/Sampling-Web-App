@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The statistical engine suite: sample size and allocation, draw correctness,
+      # seeded reproducibility, non-response adjustment, raking, FPC handling and
+      # lonely-PSU policy. These assertions are the ones that catch silently wrong
+      # numbers, so they gate the build.
+      - name: Statistical engine tests
+        run: npm test
+
+      # Heavier validation of the seeded PRNG: chi-square uniformity, absence of
+      # modulo bias, full Fisher-Yates rather than Sattolo, and uniform SRSWOR
+      # inclusion probabilities. Millions of draws, so it runs as its own step.
+      - name: PRNG statistical validation
+        run: npm run test:rng
+
+      - name: Production build
+        run: npm run build
+
+  lint:
+    name: Lint (advisory)
+    runs-on: ubuntu-latest
+    # Non-blocking: the codebase carries pre-existing `no-explicit-any` debt from the
+    # `any[]` row types used for arbitrary CSV columns. Tracked as T25 in FIXPLAN.md.
+    # Reported here so the count is visible and cannot grow unnoticed.
+    continue-on-error: true
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
