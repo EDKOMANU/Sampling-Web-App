@@ -127,9 +127,21 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
 
 ## Phase 3 — Project workspace
 
+> **Target decision (2026-08-19): Electron desktop is the primary delivery target**,
+> not the browser. A browser build pulling a large census frame may crash or run slow;
+> the app should lean on the user's own machine capacity. Consequences below.
+
 - [ ] **T13. Split `App.tsx` (4,061 lines, ~60 hooks) into per-module routes**
-- [ ] **T14. IndexedDB store + project manifest + autosave + project switcher**
+  - Also address the 1.03 MB un-split JS chunk the build warns about.
+- [ ] **T14. Project store + manifest + autosave + project switcher**
+  - Use the **filesystem via the Electron main process**, NOT IndexedDB: real paths,
+    no quota ceiling, and projects that live where the user can back them up.
+  - Needs IPC handlers in `electron/main.cjs` (which currently has none — note the
+    unhandled `get-version` channel in the deferred list) and a widened preload API.
+  - Browser build can fall back to IndexedDB as a demo tier.
 - [ ] **T15. `.mredproj` import/export with frame SHA-256 hashing**
+  - A real file on disk via native save/open dialogs. Hash on the Node side so a
+    million-row frame is streamed, not materialised in renderer memory.
 - [ ] **T16. Methodology log behind every engine call**
 - [ ] **T17. Generated Survey Methodology Report**
 
@@ -142,7 +154,13 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
 - [ ] **T20. IRLS for the propensity model + propensity-quintile adjustment cells**
 - [ ] **T21. Jackknife and BRR-Fay replicate weights**
 - [ ] **T22. Design-based quantiles (Woodruff) and ratio estimation**
-- [ ] **T23. Move bootstrap into a Web Worker with typed-array replicate storage**
+- [ ] **T23. Move the bootstrap off the main thread with typed-array replicate storage**
+  - Given the Electron-first decision, prefer Node `worker_threads` or an Electron
+    utility process over a Web Worker — more headroom, and it can stream from disk.
+- [ ] **T24. Stream large frame ingestion on the Node side**
+  - The browser FileReader path materialises the whole file in renderer memory, which
+    is exactly the crash the desktop target is meant to avoid. Also lets the `xlsx`
+    prototype-pollution exposure be contained to the main process.
 
 ---
 
