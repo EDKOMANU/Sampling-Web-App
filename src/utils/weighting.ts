@@ -77,8 +77,9 @@ export function adjustWeightingClass(
   sample: any[],
   classCol: string,
   responseCol: string,
-  weightCol = "weight"
-): { respondents: any[]; fullSample: any[] } {
+  weightCol = "weight",
+  preflightOptions: PreflightOptions = {}
+): { respondents: any[]; fullSample: any[]; warnings: CalibrationWarning[] } {
   // Group by weighting class
   const classSums: Record<string, { eligibleWeight: number; respondentWeight: number; totalCount: number; respondentCount: number }> = {};
 
@@ -129,7 +130,73 @@ export function adjustWeightingClass(
 
   const respondents = fullSample.filter(row => Number(row[responseCol]) === 1);
 
-  return { respondents, fullSample };
+  // --- Pre-flight: classes that cannot carry a defensible adjustment ---
+  // Carlson & Williams (2001) name exactly two failure modes for weighting-class
+  // adjustment: cells with too few respondents, and inflation factors that are too
+  // large. Both inflate variance sharply, and neither is visible in the output weights.
+  // The remedy in both cases is to collapse the class into a neighbour.
+  const warnings: CalibrationWarning[] = [];
+  const minRespondents = preflightOptions.minClassRespondents ?? 20;
+  const maxFactor = preflightOptions.maxAdjustmentFactor ?? 3.0;
+
+  const emptyClasses: string[] = [];
+  const thinClasses: string[] = [];
+  const inflatedClasses: string[] = [];
+  let lostWeight = 0;
+  let totalEligibleWeight = 0;
+
+  Object.keys(classSums).forEach(cls => {
+    const cell = classSums[cls];
+    totalEligibleWeight += cell.eligibleWeight;
+
+    if (cell.respondentCount === 0) {
+      emptyClasses.push(`"${cls}" (${cell.totalCount} sampled, 0 responded)`);
+      lostWeight += cell.eligibleWeight;
+      return;
+    }
+    if (cell.respondentCount < minRespondents) {
+      thinClasses.push(`"${cls}" (${cell.respondentCount})`);
+    }
+    const factor = cell.eligibleWeight / cell.respondentWeight;
+    if (factor > maxFactor) {
+      inflatedClasses.push(`"${cls}" (x${factor.toFixed(1)})`);
+    }
+  });
+
+  if (emptyClasses.length > 0) {
+    const share = totalEligibleWeight > 0 ? lostWeight / totalEligibleWeight : 0;
+    warnings.push({
+      severity: 'error',
+      code: 'NR_CLASS_NO_RESPONDENTS',
+      message: `No respondents at all in ${emptyClasses.join(', ')}. Those classes carry `
+        + `${(share * 100).toFixed(1)}% of the eligible population weight and it is dropped `
+        + `entirely: the adjusted weights no longer represent that part of the population. `
+        + `Collapse these classes into a neighbouring one before weighting.`
+    });
+  }
+
+  if (thinClasses.length > 0) {
+    warnings.push({
+      severity: 'warning',
+      code: 'NR_CLASS_TOO_FEW_RESPONDENTS',
+      message: `Fewer than ${minRespondents} respondents in ${thinClasses.join(', ')}. `
+        + `An adjustment estimated from so few cases is unstable and inflates the variance `
+        + `of every estimate that uses it. Consider collapsing these classes.`
+    });
+  }
+
+  if (inflatedClasses.length > 0) {
+    warnings.push({
+      severity: 'warning',
+      code: 'NR_CLASS_FACTOR_TOO_LARGE',
+      message: `Adjustment factor above ${maxFactor} in ${inflatedClasses.join(', ')}. `
+        + `A large factor means a few respondents are standing in for many non-respondents, `
+        + `which sharply increases the weight variation and lowers the effective sample size. `
+        + `Collapsing the class trades a little bias for a lot of precision.`
+    });
+  }
+
+  return { respondents, fullSample, warnings };
 }
 
 /**
@@ -249,9 +316,9 @@ export function adjustResponsePropensity(
   categoricalCovariates: string[],
   weightCol = "weight",
   maxWeightMultiplier = 5.0
-): { respondents: any[]; fullSample: any[] } {
+): { respondents: any[]; fullSample: any[]; warnings: CalibrationWarning[] } {
   const N = sample.length;
-  if (N === 0) return { respondents: [], fullSample: [] };
+  if (N === 0) return { respondents: [], fullSample: [], warnings: [] };
 
   // 1. One-hot encoding of categorical variables
   const categoryValues: Record<string, string[]> = {};
@@ -352,7 +419,10 @@ export function adjustResponsePropensity(
 
   const respondents = fullSample.filter(row => Number(row[responseCol]) === 1);
 
-  return { respondents, fullSample };
+  // Propensity-model diagnostics (fit quality, propensity distribution, effective
+  // sample size) belong with the IRLS rewrite in T20; the channel is here so callers
+  // can treat both non-response paths identically.
+  return { respondents, fullSample, warnings: [] };
 }
 
 export interface RakingMargin {
@@ -364,6 +434,113 @@ export interface CalibrationWarning {
   severity: 'error' | 'warning';
   code: string;
   message: string;
+}
+
+/** Tunable thresholds for the calibration and non-response pre-flight checks. */
+export interface PreflightOptions {
+  /** Relative disagreement between margin grand totals that counts as an error. Default 0.1%. */
+  marginTotalTolerance?: number;
+  /** Share of starting weight allowed to sit in categories no margin controls. Default 0.1%. */
+  uncontrolledWeightTolerance?: number;
+  /** Minimum respondents in a weighting class before its adjustment is trustworthy. Default 20. */
+  minClassRespondents?: number;
+  /** Adjustment factor above which a weighting class should be collapsed. Default 3. */
+  maxAdjustmentFactor?: number;
+}
+
+/**
+ * Validate a calibration specification BEFORE any weight is touched.
+ *
+ * Two failures are possible here that the iteration itself cannot detect, because in
+ * both cases the algorithm converges happily on a specification that does not describe
+ * the population it claims to:
+ *
+ *  1. Margins that sum to different grand totals. IPF fits one margin at a time, so if
+ *     age says the population is 100,000 and region says 98,000, each pass drags the
+ *     weights toward a different total and no fixed point exists. The loop either
+ *     oscillates until it hits maxIterations or lands wherever the last margin left it.
+ *     Deming & Stephan (1940) require a common total; nothing in this codebase checked it.
+ *
+ *  2. Sample categories that no margin controls. The raking loop guards its updates with
+ *     `if (cat in sampleWeightedSums)`, so rows in a category absent from the targets are
+ *     never adjusted for that margin. Their weights survive untouched but sit outside the
+ *     margin total, so the calibrated weights quietly stop summing to the population.
+ *     This is the mirror image of the target-category collapsing already handled, and it
+ *     is the more dangerous direction because nothing downstream reveals it.
+ */
+export function preflightCalibration(
+  sample: any[],
+  margins: RakingMargin[],
+  weightCol = "weight",
+  options: PreflightOptions = {}
+): CalibrationWarning[] {
+  const warnings: CalibrationWarning[] = [];
+  if (sample.length === 0 || margins.length === 0) return warnings;
+
+  const totalTol = options.marginTotalTolerance ?? 0.001;
+  const uncontrolledTol = options.uncontrolledWeightTolerance ?? 0.001;
+
+  // --- Check 1: every margin must describe the same population total ---
+  const totals = margins.map(m => ({
+    column: m.column,
+    total: Object.values(m.targets).reduce((a, b) => a + (Number(b) || 0), 0)
+  }));
+  const positive = totals.filter(t => t.total > 0);
+
+  if (positive.length >= 2) {
+    const maxT = Math.max(...positive.map(t => t.total));
+    const minT = Math.min(...positive.map(t => t.total));
+    const relSpread = maxT > 0 ? (maxT - minT) / maxT : 0;
+
+    if (relSpread > totalTol) {
+      const detail = totals
+        .map(t => `"${t.column}" = ${t.total.toLocaleString()}`)
+        .join(', ');
+      warnings.push({
+        severity: 'error',
+        code: 'MARGIN_TOTALS_INCONSISTENT',
+        message: `The margins describe different population totals, disagreeing by `
+          + `${(relSpread * 100).toFixed(2)}%: ${detail}. Calibration fits one margin at a `
+          + `time, so no set of weights can satisfy all of them at once; the result would `
+          + `depend on which margin happened to be fitted last. Reconcile the targets so `
+          + `every margin sums to the same population total.`
+      });
+    }
+  }
+
+  // --- Check 2: sample categories that no margin controls ---
+  let totalWeight = 0;
+  sample.forEach(row => { totalWeight += Number(row[weightCol]) || 1.0; });
+
+  margins.forEach(m => {
+    const controlled = new Set(Object.keys(m.targets));
+    const uncontrolled: Record<string, number> = {};
+    let uncontrolledWeight = 0;
+
+    sample.forEach(row => {
+      const cat = String(row[m.column]);
+      if (!controlled.has(cat)) {
+        uncontrolled[cat] = (uncontrolled[cat] || 0) + (Number(row[weightCol]) || 1.0);
+        uncontrolledWeight += Number(row[weightCol]) || 1.0;
+      }
+    });
+
+    const share = totalWeight > 0 ? uncontrolledWeight / totalWeight : 0;
+    if (share > uncontrolledTol) {
+      const names = Object.keys(uncontrolled).sort().slice(0, 6);
+      const shown = names.join(', ') + (Object.keys(uncontrolled).length > names.length ? ', ...' : '');
+      warnings.push({
+        severity: 'error',
+        code: 'SAMPLE_CATEGORY_UNMATCHED',
+        message: `"${m.column}": ${(share * 100).toFixed(1)}% of the sample weight sits in `
+          + `categories with no matching target (${shown}). Calibration cannot adjust those `
+          + `rows, so the calibrated weights will not sum to the population total. Add targets `
+          + `for them, or recode them into a category that has one.`
+      });
+    }
+  });
+
+  return warnings;
 }
 
 export interface RakingResult {
@@ -401,14 +578,19 @@ export function rakeWeights(
   weightCol = "weight",
   maxIterations = 40,
   tolerance = 0.001,
-  trimBounds?: [number, number]
+  trimBounds?: [number, number],
+  preflightOptions: PreflightOptions = {}
 ): RakingResult {
   const N = sample.length;
   if (N === 0) {
     return { sample: [], converged: false, iterations: 0, maxDiscrepancy: 0, marginsSummary: [], warnings: [] };
   }
 
-  const warnings: CalibrationWarning[] = [];
+  // Validate the specification before touching a single weight. A margin set that fails
+  // pre-flight cannot produce a usable result, however cleanly the iteration converges
+  // against those inconsistent targets.
+  const warnings: CalibrationWarning[] = preflightCalibration(sample, margins, weightCol, preflightOptions);
+  const preflightBlocked = warnings.some(w => w.severity === 'error');
 
   // Create workspace copy of sample with weight trackers
   const workingSample = sample.map(row => ({
@@ -635,7 +817,9 @@ export function rakeWeights(
 
   return {
     sample: finalSample,
-    converged,
+    // A specification that failed pre-flight cannot yield usable weights even if the
+    // iteration met its own tolerance against those inconsistent targets.
+    converged: converged && !preflightBlocked,
     iterations: iter,
     maxDiscrepancy: lastMaxDiscrepancy,
     marginsSummary,
@@ -710,14 +894,16 @@ export function solveLinearSystem(A: number[][], b: number[]): number[] {
 export function calibrateLinear(
   sample: any[],
   margins: RakingMargin[],
-  weightCol = "weight"
+  weightCol = "weight",
+  preflightOptions: PreflightOptions = {}
 ): RakingResult {
   const N = sample.length;
   if (N === 0) {
     return { sample: [], converged: false, iterations: 0, maxDiscrepancy: 0, marginsSummary: [], warnings: [] };
   }
 
-  const warnings: CalibrationWarning[] = [];
+  const warnings: CalibrationWarning[] = preflightCalibration(sample, margins, weightCol, preflightOptions);
+  const preflightBlocked = warnings.some(w => w.severity === 'error');
 
   // Detect and resolve category mismatches (census categories with zero survey respondents)
   const sampleCategoriesPerMargin: Record<string, Set<string>> = {};
@@ -942,7 +1128,7 @@ export function calibrateLinear(
 
   return {
     sample: finalSample,
-    converged,
+    converged: converged && !preflightBlocked,
     iterations: 1,
     maxDiscrepancy,
     marginsSummary,
@@ -961,17 +1147,18 @@ export function calibrateWeights(
   weightCol = "weight",
   trimBounds?: [number, number],
   maxIterations = 50,
-  tolerance = 0.001
+  tolerance = 0.001,
+  preflightOptions: PreflightOptions = {}
 ): RakingResult {
   if (method === 'linear') {
-    return calibrateLinear(sample, margins, weightCol);
+    return calibrateLinear(sample, margins, weightCol, preflightOptions);
   } else if (method === 'logit') {
     // Logit/bounded calibration is solved via truncated raking with strict bounds
     const bounds = trimBounds || [0.1, 10.0];
-    return rakeWeights(sample, margins, weightCol, maxIterations, tolerance, bounds);
+    return rakeWeights(sample, margins, weightCol, maxIterations, tolerance, bounds, preflightOptions);
   } else {
     // Standard Multiplicative Raking
-    return rakeWeights(sample, margins, weightCol, maxIterations, tolerance, trimBounds);
+    return rakeWeights(sample, margins, weightCol, maxIterations, tolerance, trimBounds, preflightOptions);
   }
 }
 

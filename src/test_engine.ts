@@ -5,7 +5,7 @@
 
 import { calcCochran, calcSlovin, calcComplexSurvey, allocateStrata } from './utils/samplesize';
 import { drawSRS, drawStratified } from './utils/sampling';
-import { adjustWeightingClass, rakeWeights } from './utils/weighting';
+import { adjustWeightingClass, rakeWeights, preflightCalibration } from './utils/weighting';
 import { estimateTaylor, generateBootstrapWeights } from './utils/variance';
 import { createRng } from './utils/random';
 
@@ -217,6 +217,80 @@ assert(Math.abs(urbanSumRaked - urbanTarget) < 0.5, "Raked Urban total must hit 
 assert(Math.abs(ruralSumRaked - ruralTarget) < 0.5, "Raked Rural total must hit the redistributed census target");
 assert(Math.abs((urbanSumRaked + ruralSumRaked) - 1050) < 0.5, "Calibrated weights must reproduce the full population total");
 assert(raked.warnings.some(w => w.code === "TARGET_CATEGORY_COLLAPSED"), "Collapsing a zero-respondent target category must raise a warning");
+
+// --- CALIBRATION PRE-FLIGHT (T11) ---
+// Three specification errors that the iteration itself cannot detect, because in each
+// case it converges happily on a specification that misdescribes the population.
+
+const pfSample = Array.from({ length: 200 }, (_, i) => ({
+  id: i,
+  weight: 10,
+  age: i < 100 ? "18-34" : "35+",
+  region: i % 2 === 0 ? "North" : "South",
+}));
+
+// 1. Margins that sum to different grand totals. IPF fits one margin at a time, so no
+//    fixed point exists and the answer depends on which margin was fitted last.
+const badTotals = preflightCalibration(pfSample, [
+  { column: "age", targets: { "18-34": 50000, "35+": 50000 } },      // 100,000
+  { column: "region", targets: { North: 49000, South: 49000 } },     //  98,000
+], "weight");
+assert(badTotals.some(w => w.code === "MARGIN_TOTALS_INCONSISTENT"),
+  "margins summing to different totals must be rejected");
+console.log(`- Pre-flight: inconsistent margin totals detected (100,000 vs 98,000)`);
+
+// Consistent totals must NOT trip it.
+const goodTotals = preflightCalibration(pfSample, [
+  { column: "age", targets: { "18-34": 50000, "35+": 50000 } },
+  { column: "region", targets: { North: 50000, South: 50000 } },
+], "weight");
+assert(goodTotals.length === 0, "a well-formed margin set must raise nothing");
+
+// 2. Sample categories no margin controls. The raking loop guards its updates with
+//    `if (cat in sampleWeightedSums)`, so these rows are never adjusted and the
+//    calibrated weights quietly stop summing to the population total.
+const orphanSample = [
+  ...pfSample,
+  ...Array.from({ length: 40 }, (_, i) => ({
+    id: 1000 + i, weight: 10, age: "65+", region: "North",   // no target for "65+"
+  })),
+];
+const orphan = preflightCalibration(orphanSample, [
+  { column: "age", targets: { "18-34": 50000, "35+": 50000 } },
+], "weight");
+assert(orphan.some(w => w.code === "SAMPLE_CATEGORY_UNMATCHED"),
+  "sample categories with no matching target must be reported");
+console.log(`- Pre-flight: uncontrolled category "65+" detected (16.7% of sample weight)`);
+
+// 3. The blocked specification must not report success.
+const blockedRake = rakeWeights(pfSample, [
+  { column: "age", targets: { "18-34": 50000, "35+": 50000 } },
+  { column: "region", targets: { North: 49000, South: 49000 } },
+], "weight", 50, 0.001);
+assert(!blockedRake.converged,
+  "raking must not report convergence on a specification that failed pre-flight");
+assert(blockedRake.warnings.some(w => w.severity === "error"),
+  "a blocked specification must carry an error-severity warning");
+console.log("- Pre-flight: inconsistent margins no longer report convergence");
+
+// 4. Weighting classes that cannot carry a defensible adjustment.
+//    Carlson & Williams (2001) name both of these as the failure modes of the method.
+const nrSample = [
+  // a class where nobody responded at all
+  ...Array.from({ length: 30 }, (_, i) => ({ id: i, weight: 10, cls: "Remote", resp: 0 })),
+  // a thin class: 3 respondents standing in for 30 sampled units
+  ...Array.from({ length: 30 }, (_, i) => ({ id: 100 + i, weight: 10, cls: "Rural", resp: i < 3 ? 1 : 0 })),
+  // a healthy class
+  ...Array.from({ length: 60 }, (_, i) => ({ id: 200 + i, weight: 10, cls: "Urban", resp: i < 50 ? 1 : 0 })),
+];
+const nrRes = adjustWeightingClass(nrSample, "cls", "resp", "weight");
+assert(nrRes.warnings.some(w => w.code === "NR_CLASS_NO_RESPONDENTS"),
+  "a class with zero respondents must be an error: its population share is dropped");
+assert(nrRes.warnings.some(w => w.code === "NR_CLASS_TOO_FEW_RESPONDENTS"),
+  "a class below the minimum respondent count must be flagged");
+assert(nrRes.warnings.some(w => w.code === "NR_CLASS_FACTOR_TOO_LARGE"),
+  "an adjustment factor above the cap must be flagged");
+console.log("- Pre-flight: empty, thin and over-inflated weighting classes all reported");
 
 // ==========================================
 // 4. TEST: Variance & Design Effect Estimation

@@ -989,8 +989,22 @@ Seed: ${seedInfo.canonical}
       });
 
       // 1. Apply Non-Response adjustment if requested
+      // T11: the weighting-class pre-flight reports classes that cannot carry a
+      // defensible adjustment. A class with no respondents drops its whole population
+      // share, so that is an error, not an advisory.
+      let nrWarnings: CalibrationWarning[] = [];
+
       if (nonResponseMethod === 'class' && responseCol && weightClassCol) {
         const adjustRes = adjustWeightingClass(currentSample, weightClassCol, responseCol, 'weight');
+        nrWarnings = adjustRes.warnings || [];
+        const nrBlockers = nrWarnings.filter(w => w.severity === 'error');
+        if (nrBlockers.length > 0) {
+          alert(
+            'Non-response adjustment failed — weights were not applied.\n\n'
+            + nrBlockers.map(w => `• ${w.message}`).join('\n\n')
+          );
+          return;
+        }
         currentSample = adjustRes.respondents;
       } else if (nonResponseMethod === 'propensity' && responseCol) {
         const adjustRes = adjustResponsePropensity(
@@ -1015,7 +1029,8 @@ Seed: ${seedInfo.canonical}
       }
 
       // 2. Apply Calibration if margins are set
-      let advisories: CalibrationWarning[] = [];
+      // Non-response advisories carry through: they describe the weights being calibrated.
+      let advisories: CalibrationWarning[] = [...nrWarnings];
 
       if (rakingMargins.length > 0) {
         // Retrieve trimming bounds: GREG does not support trimming, truncated raking uses bounds directly, raking supports custom
@@ -1051,7 +1066,7 @@ Seed: ${seedInfo.canonical}
           return;
         }
 
-        advisories = rakeRes.warnings || [];
+        advisories = [...nrWarnings, ...(rakeRes.warnings || [])];
         setWeightedSample(rakeRes.sample);
         setRakingResult(rakeRes);
       } else {

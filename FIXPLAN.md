@@ -154,11 +154,31 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
   - Remaining from this task: logit-transformed intervals for proportions near
     0/1 (Wald is poor there). Moved to T26.
 
-- [ ] **T11. Calibration pre-flight validation**
+- [x] **T11. Calibration pre-flight validation** — DONE 2026-08-19
   - Files: `src/utils/weighting.ts`, `src/App.tsx`
-  - Checks: all margin totals agree within tolerance; sample categories with no
-    matching target are listed; weighting classes below a minimum respondent count
-    or above a maximum adjustment factor are flagged for collapsing.
+  - New `preflightCalibration()` runs before any weight is touched, called from
+    `rakeWeights`, `calibrateLinear` and `calibrateWeights`. Thresholds are tunable
+    via `PreflightOptions`.
+  - `MARGIN_TOTALS_INCONSISTENT` (error): margins describing different population
+    totals. IPF fits one margin at a time, so no fixed point exists and the result
+    depends on which margin was fitted last (Deming & Stephan 1940 require a common
+    total). A specification that fails pre-flight can no longer report `converged`.
+  - `SAMPLE_CATEGORY_UNMATCHED` (error): sample categories no margin controls. The
+    raking loop guards updates with `if (cat in sampleWeightedSums)`, so those rows
+    are never adjusted and the calibrated weights quietly stop summing to the
+    population. Reported with the share of weight affected.
+  - `adjustWeightingClass` now returns `warnings` too: `NR_CLASS_NO_RESPONDENTS`
+    (error — that class's whole population share is dropped),
+    `NR_CLASS_TOO_FEW_RESPONDENTS` and `NR_CLASS_FACTOR_TOO_LARGE` (warnings).
+    These are the two failure modes Carlson & Williams (2001) name for the method.
+    `adjustResponsePropensity` returns the same shape so callers can treat both
+    paths identically; its diagnostics land with T20.
+  - Accept: VERIFIED. Tests cover all five codes. Re-running the new assertions
+    against the pre-T11 engine, 4 of 5 fail — the fifth (non-convergence on
+    inconsistent margins) already happened by accident, but the old code never
+    said why.
+  - Lint 107 -> 110 errors, all `any[]` on the new signatures, consistent with
+    every sibling. Tracked in T25.
 
 - [ ] **T12. Structured warning channel**
   - Partly built: `CalibrationWarning` (T3) and `VarianceWarning` (T8) exist and
