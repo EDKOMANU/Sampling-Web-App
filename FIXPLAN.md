@@ -224,8 +224,31 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
 - [ ] **T15. `.mredproj` import/export with frame SHA-256 hashing**
   - A real file on disk via native save/open dialogs. Hash on the Node side so a
     million-row frame is streamed, not materialised in renderer memory.
-- [ ] **T16. Methodology log behind every engine call**
-- [ ] **T17. Generated Survey Methodology Report**
+- [x] **T16. Methodology log behind every engine call** — DONE 2026-08-19
+  - `MethodologyEvent {id, at, stage, summary, details}` in new
+    `src/utils/methodology.ts`; `recordStep()` in App.tsx appends one per step.
+  - Recorded today: Draw (design, n, N, seed, fingerprint, mean inclusion
+    probability, sum of weights, strata column), Non-response (method, response
+    indicator, class column, respondents retained), Calibration (method, margins,
+    trimming bounds, advisories raised), Variance (estimate, SE, CV, CI, df, t
+    multiplier, deff, strata/cluster/FPC columns, single-PSU rule).
+  - Append-only and ordered: a step that was REFUSED still belongs in the record.
+  - Not yet recorded: Frame load, Sample size, Allocation, Fieldwork upload.
+    Straightforward to add — the recorder is in place, the handlers just need the
+    call. Logged below.
+- [x] **T17. Generated Survey Methodology Report** — DONE 2026-08-19
+  - `buildMethodologyReport()` renders the recorded steps plus the full diagnostic
+    log into a **self-contained HTML document** — no external assets, so it
+    survives being emailed to a reviewer, archived beside the published figures,
+    and opened years later on a machine that never ran this application.
+  - Grouped by stage in lifecycle order, with a diagnostics table showing severity,
+    stage, code and finding. States plainly that an estimate should not be
+    published while an unresolved error stands against it, and that refused
+    corrections leave the estimate conservative.
+  - Reachable from the diagnostics panel: "Full log" -> "Export Methodology Report".
+  - Accept: VERIFIED by generating a report from a real stratified draw and
+    inspecting the rendered DOM — title, all four stage sections, three recorded
+    steps and footer present; HTML-escaping clean.
 
 ---
 
@@ -281,6 +304,10 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
 ---
 
 ## Deferred / noted, not scheduled
+
+- **Record the remaining lifecycle stages** (Frame load, Sample size, Allocation,
+  Fieldwork upload). T16 built the recorder and wired Draw / Non-response /
+  Calibration / Variance; the rest is one `recordStep()` call per handler.
 
 - **Expose domain estimation in the variance tab.** T18 landed the estimator; the
   UI still has no domain selector, so users cannot reach it. Small, high value.

@@ -49,6 +49,9 @@ import { calculateWeightSummary, adjustWeightingClass, adjustResponsePropensity,
 import type { RakingMargin, CalibrationWarning } from './utils/weighting';
 import type { Diagnostic, LoggedDiagnostic } from './utils/diagnostics';
 import { hasBlockingError, dedupeByCode } from './utils/diagnostics';
+import type { MethodologyEvent, MethodologyStage } from './utils/methodology';
+import { buildMethodologyReport } from './utils/methodology';
+import { RNG_ALGORITHM_ID } from './utils/random';
 import { estimateTaylor, generateBootstrapWeights, estimateBootstrap } from './utils/variance';
 import type { LonelyPsuPolicy } from './utils/variance';
 
@@ -216,6 +219,25 @@ function App() {
   const [diagnosticLog, setDiagnosticLog] = useState<LoggedDiagnostic[]>([]);
   const [showLog, setShowLog] = useState<boolean>(false);
   const diagnosticSeq = React.useRef(0);
+
+  // The methodology record: what was done, in order, with the parameters needed to
+  // reproduce it. Append-only — a step that was refused still belongs in the record.
+  const [methodologyEvents, setMethodologyEvents] = useState<MethodologyEvent[]>([]);
+  const methodologySeq = React.useRef(0);
+
+  const recordStep = React.useCallback((
+    stage: MethodologyStage,
+    summary: string,
+    details: Record<string, string | number | boolean> = {}
+  ) => {
+    setMethodologyEvents(prev => [...prev, {
+      id: ++methodologySeq.current,
+      at: new Date().toISOString(),
+      stage,
+      summary,
+      details,
+    }]);
+  }, []);
 
   const pushDiagnostics = React.useCallback((items: Diagnostic[], source: string) => {
     if (items.length === 0) return;
@@ -975,6 +997,17 @@ function App() {
         drawnAt: new Date().toISOString()
       });
 
+      recordStep('Draw', `Drew ${result.length} units by ${selectedSamplingMethod.toUpperCase()}`, {
+        'Design': selectedSamplingMethod,
+        'Sample size (n)': result.length,
+        'Frame rows (N)': populationFrame.length,
+        'Seed': seedInfo.canonical,
+        'Seed fingerprint': seedInfo.fingerprint,
+        'Mean inclusion probability': avgProb.toFixed(6),
+        'Sum of weights': Math.round(sumWeight),
+        'Stratification column': stratificationDrawCol || '(none)',
+      });
+
       alert(
         `Drew ${result.length} units.
 
@@ -1126,6 +1159,22 @@ Seed: ${seedInfo.canonical}
       setTaylorResults(null);
       setBootstrapResults(null);
 
+      recordStep('Non-response', `Non-response treatment: ${nonResponseMethod}`, {
+        'Method': nonResponseMethod,
+        'Response indicator': responseCol || '(none)',
+        'Weighting class column': weightClassCol || '(not applicable)',
+        'Respondents retained': currentSample.length,
+      });
+
+      if (rakingMargins.length > 0) {
+        recordStep('Calibration', `Calibrated on ${rakingMargins.length} margin(s) by ${calibrationMethod}`, {
+          'Method': calibrationMethod,
+          'Margins': rakingMargins.map(m => m.column).join(', '),
+          'Trimming': trimmingEnabled ? `[${trimLower}, ${trimUpper}]` : 'none',
+          'Advisories raised': advisories.length,
+        });
+      }
+
       pushDiagnostics(
         advisories.length > 0
           ? advisories
@@ -1166,6 +1215,21 @@ Seed: ${seedInfo.canonical}
     );
 
     setTaylorResults(res);
+
+    recordStep('Variance', `Estimated the mean of ${targetEstVar} by Taylor linearisation`, {
+      'Variable': targetEstVar,
+      'Estimate': res.estimate.toFixed(4),
+      'Standard error': res.se.toFixed(4),
+      'CV (%)': (res.cv * 100).toFixed(3),
+      '95% CI': `${res.ciLower.toFixed(4)} to ${res.ciUpper.toFixed(4)}`,
+      'Degrees of freedom': res.df,
+      't multiplier': Number.isFinite(res.criticalValue) ? res.criticalValue.toFixed(4) : 'n/a',
+      'Design effect': res.deff.toFixed(4),
+      'Strata column': varianceStrataCol || '(none)',
+      'Cluster column': varianceClusterCol || '(none)',
+      'FPC column': varianceFpcCol || '(no correction applied)',
+      'Single-PSU rule': lonelyPsuPolicy,
+    });
 
     // Surface methodological problems rather than quietly returning a plausible number.
     const problems = res.warnings || [];
@@ -1319,6 +1383,35 @@ Seed: ${seedInfo.canonical}
 
 
   // Export Sample Handler
+  // T17: render the recorded methodology into the document that accompanies published
+  // figures. Self-contained HTML so it survives being emailed, archived, and opened
+  // years later on a machine that has never run this application.
+  const handleExportMethodologyReport = () => {
+    const html = buildMethodologyReport({
+      events: methodologyEvents,
+      diagnostics: diagnosticLog,
+      generatedAt: new Date().toISOString(),
+      appVersion: '1.0.0',
+      rngAlgorithm: RNG_ALGORITHM_ID,
+    });
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Survey_Methodology_Report_${new Date().toISOString().slice(0, 10)}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    pushDiagnostics([{
+      severity: 'success',
+      code: 'REPORT_EXPORTED',
+      message: `Methodology report exported: ${methodologyEvents.length} recorded step`
+        + `${methodologyEvents.length === 1 ? '' : 's'} and ${diagnosticLog.length} diagnostic`
+        + `${diagnosticLog.length === 1 ? '' : 's'}.`,
+    }], 'Methodology');
+  };
+
   const handleExportSample = () => {
     if (sampleResult.length === 0) return;
     const worksheet = XLSX.utils.json_to_sheet(sampleResult);
@@ -1415,10 +1508,30 @@ Seed: ${seedInfo.canonical}
                   Every decision this session made on your behalf, in order. This is the record a published estimate rests on.
                 </p>
               </div>
+              <button
+                onClick={handleExportMethodologyReport}
+                className="mr-3 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold transition-colors"
+              >
+                Export Methodology Report
+              </button>
               <button onClick={() => setShowLog(false)} className="text-gray-500 hover:text-white bg-white/5 hover:bg-white/10 p-2 rounded-full">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12"></path></svg>
               </button>
             </div>
+            {methodologyEvents.length > 0 && (
+              <div className="px-6 py-3 border-b border-white/10 bg-white/[0.02]">
+                <p className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mb-2">
+                  Recorded steps ({methodologyEvents.length})
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {methodologyEvents.map(e => (
+                    <span key={e.id} className="text-[10px] font-mono px-2 py-1 rounded bg-white/5 text-gray-300 border border-white/10">
+                      {e.stage}: {e.summary}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="overflow-y-auto divide-y divide-white/5">
               {diagnosticLog.length === 0 ? (
                 <p className="px-6 py-8 text-sm text-gray-400">Nothing recorded yet.</p>
