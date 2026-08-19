@@ -196,12 +196,17 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
 - Build emits a 1.03 MB JS chunk with no code splitting — fold into T13.
 - ~~README calls the bootstrap "McCarthy-Snowden"~~ — corrected in T5 to
   "Rao-Wu rescaled stratified cluster bootstrap".
-- `.gitignore` is a stale Flash/ActionScript template: it does not ignore
-  `node_modules/`, `dist/`, or `dist-electron-v3/`. 83 build artefacts are tracked
-  under `dist-electron-v3/` (including .exe, .dll and .pak binaries) plus 6 under
-  `dist/`. This bloats the repo and makes every diff unreadable. Needs a real
-  .gitignore plus `git rm -r --cached` on the build dirs — a history decision for
-  the owner, so not scheduled unilaterally.
+- ~~`.gitignore` stale + build artefacts tracked~~ — RESOLVED 2026-08-19.
+  Real .gitignore added; `node_modules/` (19,142 files), `dist/`,
+  `dist-electron/`, `dist-electron-v3/` and `dist-electron-built/` untracked, then
+  stripped from all history with `git-filter-repo`.
+  **Pack size 748.31 MiB -> 621.42 KiB (1,233x smaller); 19,179 objects -> 131.**
+  All 18 commits and all source preserved; tests and build verified after the
+  rewrite. The largest single culprit was a `dist-electron/` directory from
+  2026-05-24 (419 MB packed) that had long since left the working tree.
+  Backup bundle: `C:/Users/manue/Documents/_sampling-repo-backup-20260819/full-history.bundle`
+  (verified complete — delete once the force-push is confirmed good).
+  All commit SHAs changed; re-clone rather than pull any other copy.
 - 20 npm audit findings. The one that matters for the threat model is HIGH
   `xlsx` prototype pollution — it parses user-supplied census/survey files.
   npm's `xlsx@0.18.5` is the stale registry build; SheetJS now ships from
