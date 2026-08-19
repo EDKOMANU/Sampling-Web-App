@@ -335,6 +335,38 @@ assert(singlePsu.warnings.some(w => w.code === "NO_ESTIMABLE_VARIANCE"),
   "a single-PSU sample must say no variance is estimable rather than reporting SE = 0");
 console.log("  * Single-PSU configuration reports NO_ESTIMABLE_VARIANCE");
 
+// --- DESIGN DEGREES OF FREEDOM AND t INTERVALS (T10) ---
+// df = sum_h (n_h - 1). Each stratum with n_h PSUs supplies n_h - 1.
+const dfFrame = Array.from({ length: 40 }, (_, i) => ({
+  id: i,
+  stratum: `S${i % 4}`,        // 4 strata x 10 units => df = 4 * 9 = 36
+  v: 20 + (i % 7) * 3,
+  weight: 25,
+}));
+const dfRes = estimateTaylor(dfFrame, "v", "weight", "stratum");
+assert(dfRes.df === 36, `design df must be sum(n_h - 1) = 36, got ${dfRes.df}`);
+assert(Math.abs(dfRes.criticalValue - 2.0281) < 0.01,
+  `t at df=36 must be ~2.028, got ${dfRes.criticalValue.toFixed(4)}`);
+assert(dfRes.criticalValue > 1.96, "the t multiplier must exceed the normal 1.96");
+const widthT = dfRes.ciUpper - dfRes.ciLower;
+const widthZ = 2 * 1.96 * dfRes.se;
+console.log(`- Design df=${dfRes.df}, t=${dfRes.criticalValue.toFixed(4)} vs z=1.9600`);
+console.log(`  * CI width ${widthT.toFixed(4)} vs ${widthZ.toFixed(4)} under the old z (${((widthT/widthZ - 1) * 100).toFixed(1)}% wider)`);
+assert(widthT > widthZ, "the t-based interval must be wider than the old z-based one");
+
+// Few PSUs must be flagged, not silently reported.
+const smallFrame = [
+  { id: 1, stratum: "A", v: 10, weight: 5 }, { id: 2, stratum: "A", v: 14, weight: 5 },
+  { id: 3, stratum: "B", v: 20, weight: 5 }, { id: 4, stratum: "B", v: 26, weight: 5 },
+];
+const smallRes = estimateTaylor(smallFrame, "v", "weight", "stratum");
+assert(smallRes.df === 2, `df must be 2 for 2 strata of 2 units, got ${smallRes.df}`);
+assert(Math.abs(smallRes.criticalValue - 4.3027) < 0.01,
+  "t at df=2 must be ~4.303, not 1.96");
+assert(smallRes.warnings.some(w => w.code === "LOW_DEGREES_OF_FREEDOM"),
+  "a design with few degrees of freedom must be flagged");
+console.log(`  * df=2 correctly uses t=${smallRes.criticalValue.toFixed(3)} (not 1.960) and warns`);
+
 // Rao-Wu Stratified Cluster Bootstrap Replicate Weight Generation
 const bootWeights = generateBootstrapWeights(raked.sample, 50, "weight", "stratum", undefined, "TEST-SEED-BOOT");
 console.log(`- Rao-Wu Stratified Bootstrap: Generated ${bootWeights.replicateWeights[0].length} replicate weights for all ${bootWeights.replicateWeights.length} rows`);

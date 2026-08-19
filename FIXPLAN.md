@@ -134,10 +134,25 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
   - Known gap: `generateBootstrapWeights` still has its own silent `n_h <= 1`
     branch, so the two engines can disagree. Folded into T21.
 
-- [ ] **T10. Design degrees of freedom and t-based intervals**
-  - Files: `src/utils/variance.ts`, `src/App.tsx`
-  - Problem: z=1.96 hard-coded in 4 places. df = (#PSUs - #strata).
-  - Also: logit-transformed intervals for proportions near 0/1.
+- [x] **T10. Design degrees of freedom and t-based intervals** — DONE 2026-08-19
+  - Files: new `src/utils/distributions.ts`, `variance.ts`, `App.tsx`
+  - `df = sum_h (n_h - 1)`, accumulated during the variance pass. A singleton
+    stratum supplies 0 df, so lonely PSUs cost precision twice — once in variance,
+    once in degrees of freedom.
+  - New `distributions.ts`: log-gamma (Lanczos), regularized incomplete beta
+    (Lentz continued fraction), Student-t CDF, t quantile by bisection, and
+    Acklam's normal quantile. Dependency-free.
+  - **Verified against published t-tables** at df = 1, 2, 5, 10, 15, 20, 30, 60,
+    120 and infinity — exact to 3 decimals at every point.
+  - Both engines now report `df` and the `criticalValue` actually used; the
+    bootstrap takes the design df from the Taylor pass rather than its own
+    hardcoded 1.96, so the two intervals rest on the same basis.
+  - `NO_DEGREES_OF_FREEDOM` when df = 0; `LOW_DEGREES_OF_FREEDOM` below 10.
+  - df and t are displayed in the results panel so they can be quoted.
+  - Accept: VERIFIED. df=36 gives t=2.0281 and a 3.5% wider interval than the old
+    z; df=2 gives t=4.303, not 1.960, and warns.
+  - Remaining from this task: logit-transformed intervals for proportions near
+    0/1 (Wald is poor there). Moved to T26.
 
 - [ ] **T11. Calibration pre-flight validation**
   - Files: `src/utils/weighting.ts`, `src/App.tsx`
@@ -191,6 +206,10 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
 - [ ] **T23. Move the bootstrap off the main thread with typed-array replicate storage**
   - Given the Electron-first decision, prefer Node `worker_threads` or an Electron
     utility process over a Web Worker — more headroom, and it can stream from disk.
+- [ ] **T26. Logit / Korn-Graubard intervals for proportions**
+  - Wald intervals misbehave for proportions near 0 or 1 (they can exit [0,1] and
+    under-cover). Split out of T10.
+
 - [ ] **T25. Clear the lint backlog (111 problems, 107 errors)**
   - Mostly `@typescript-eslint/no-explicit-any` from the `any[]` row types used for
     arbitrary CSV columns — needs a real `SampleRow`/`FrameRow` type, which pairs

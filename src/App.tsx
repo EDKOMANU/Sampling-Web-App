@@ -1186,7 +1186,11 @@ Seed: ${seedInfo.canonical}
         targetEstVar,
         boot,
         'mean',
-        taylorResults?.estimate
+        taylorResults?.estimate,
+        'weight',
+        // Use the design df the Taylor pass computed, so both engines report
+        // intervals on the same basis.
+        taylorResults?.df ?? Infinity
       );
 
       setBootstrapResults(res);
@@ -4054,9 +4058,24 @@ Seed: ${seedInfo.canonical}
                             </div>
                           </div>
 
-                          <div className="border-t border-white/10 pt-2">
-                            <span className="text-[10px] text-gray-500 block">DESIGN EFFECT (Deff)</span>
-                            <span className="font-semibold text-indigo-400 font-mono">{taylorResults.deff.toFixed(3)}</span>
+                          <div className="grid grid-cols-2 gap-2 text-xs border-t border-white/10 pt-2">
+                            <div>
+                              <span className="text-[10px] text-gray-500 block">DESIGN EFFECT (Deff)</span>
+                              <span className="font-semibold text-indigo-400 font-mono">{taylorResults.deff.toFixed(3)}</span>
+                            </div>
+                            <div>
+                              <span className="text-[10px] text-gray-500 block">
+                                DEGREES OF FREEDOM
+                              </span>
+                              <span className="font-semibold text-indigo-400 font-mono">
+                                {taylorResults.df}
+                                <span className="text-gray-500 font-normal">
+                                  {' '}(t={Number.isFinite(taylorResults.criticalValue)
+                                    ? taylorResults.criticalValue.toFixed(3)
+                                    : '--'})
+                                </span>
+                              </span>
+                            </div>
                           </div>
                         </div>
                       ) : (

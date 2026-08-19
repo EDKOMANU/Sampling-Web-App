@@ -12,6 +12,7 @@
  */
 
 import type { SeedInput } from './random';
+import { criticalValue } from './distributions';
 import { deriveStream } from './random';
 
 export interface VarianceWarning {
@@ -41,6 +42,10 @@ export interface EstimationResult {
   ciLower: number;
   ciUpper: number;
   deff: number;
+  /** Design degrees of freedom: (number of PSUs) - (number of strata). */
+  df: number;
+  /** The t multiplier actually used for the interval, at `df`. */
+  criticalValue: number;
   warnings: VarianceWarning[];
 }
 
@@ -66,7 +71,7 @@ export function estimateTaylor(
   const warnings: VarianceWarning[] = [];
   const n = sample.length;
   if (n === 0) {
-    return { estimate: 0, se: 0, cv: 0, ciLower: 0, ciUpper: 0, deff: 1.0, warnings };
+    return { estimate: 0, se: 0, cv: 0, ciLower: 0, ciUpper: 0, deff: 1.0, df: 0, criticalValue: NaN, warnings };
   }
 
   // 1. Calculate point estimate
@@ -167,7 +172,8 @@ export function estimateTaylor(
         + 'of 0 is not a standard error. Check the Strata and Cluster columns.'
     });
     return {
-      estimate, se: 0, cv: 0, ciLower: estimate, ciUpper: estimate, deff: 1.0, warnings
+      estimate, se: 0, cv: 0, ciLower: estimate, ciUpper: estimate, deff: 1.0,
+      df: 0, criticalValue: NaN, warnings
     };
   }
 
@@ -204,6 +210,10 @@ export function estimateTaylor(
   const lonely: LonelyStratum[] = [];
   let okVarianceSum = 0;
   let okStrataCount = 0;
+  // Design degrees of freedom, accumulated as sum_h (n_h - 1). A singleton stratum
+  // contributes 1 - 1 = 0, which is exactly why lonely PSUs cost precision twice:
+  // once in the variance they fail to supply, once in the df they fail to supply.
+  let designDf = 0;
 
   strataKeys.forEach(stratum => {
     const grp = strataGroups[stratum];
@@ -271,6 +281,8 @@ export function estimateTaylor(
       totalVariance += contribution;
       okVarianceSum += contribution;
       okStrataCount++;
+      // Each stratum with n_h PSUs supplies n_h - 1 degrees of freedom.
+      designDf += n_h - 1;
       return;
     }
 
@@ -337,7 +349,7 @@ export function estimateTaylor(
             + `them. ${materiality} No standard error was produced. Collapse these strata with a `
             + 'neighbour, or choose a different lonely-PSU rule.'
         });
-        return { estimate, se: NaN, cv: NaN, ciLower: NaN, ciUpper: NaN, deff: NaN, warnings };
+        return { estimate, se: NaN, cv: NaN, ciLower: NaN, ciUpper: NaN, deff: NaN, df: 0, criticalValue: NaN, warnings };
       }
 
       if (effectivePolicy === 'adjust') {
@@ -364,7 +376,7 @@ export function estimateTaylor(
             message: 'Every stratum contains a single sampling unit, so there is nothing to '
               + `average from. ${materiality} No standard error was produced.`
           });
-          return { estimate, se: NaN, cv: NaN, ciLower: NaN, ciUpper: NaN, deff: NaN, warnings };
+          return { estimate, se: NaN, cv: NaN, ciLower: NaN, ciUpper: NaN, deff: NaN, df: 0, criticalValue: NaN, warnings };
         }
         const meanContribution = okVarianceSum / okStrataCount;
         totalVariance += meanContribution * genuine.length;
@@ -396,15 +408,39 @@ export function estimateTaylor(
       message: 'The variance computation produced a non-finite value. This is a defect; '
         + 'please report the design and columns used.'
     });
-    return { estimate, se: NaN, cv: NaN, ciLower: NaN, ciUpper: NaN, deff: NaN, warnings };
+    return { estimate, se: NaN, cv: NaN, ciLower: NaN, ciUpper: NaN, deff: NaN, df: 0, criticalValue: NaN, warnings };
   }
 
   const se = Math.sqrt(totalVariance);
   const cv = estimate !== 0 ? se / Math.abs(estimate) : 0;
   
-  // 95% Confidence Interval (z = 1.96)
-  const ciLower = estimate - 1.96 * se;
-  const ciUpper = estimate + 1.96 * se;
+  // 95% confidence interval using Student's t at the DESIGN degrees of freedom,
+  // not the normal quantile 1.96. Wolter's working rule is
+  // df = (number of PSUs) - (number of strata) = sum_h (n_h - 1).
+  // At df = 15 the correct multiplier is 2.131, so an interval built on 1.96 is
+  // roughly 8% too narrow and under-covers.
+  const tCrit = designDf > 0 ? criticalValue(0.95, designDf) : NaN;
+  const ciLower = designDf > 0 ? estimate - tCrit * se : NaN;
+  const ciUpper = designDf > 0 ? estimate + tCrit * se : NaN;
+
+  if (designDf === 0) {
+    warnings.push({
+      severity: 'error',
+      code: 'NO_DEGREES_OF_FREEDOM',
+      message: 'The design supplies zero degrees of freedom, so no confidence interval '
+        + 'can be formed. Every stratum holds a single sampling unit. Collapse strata '
+        + 'with their neighbours before publishing an interval.'
+    });
+  } else if (designDf < 10) {
+    warnings.push({
+      severity: 'warning',
+      code: 'LOW_DEGREES_OF_FREEDOM',
+      message: `Only ${designDf} degree${designDf === 1 ? '' : 's'} of freedom are available, `
+        + `so the interval uses t = ${tCrit.toFixed(3)} rather than 1.960 and is `
+        + `correspondingly wide. Estimates on this few sampling units are fragile; many `
+        + 'statistical offices suppress publication below about 30 degrees of freedom.'
+    });
+  }
 
   // 4. Calculate Design Effect (Deff)
   // Deff = V_complex / V_srs
@@ -463,6 +499,8 @@ export function estimateTaylor(
     ciLower,
     ciUpper,
     deff,
+    df: designDf,
+    criticalValue: tCrit,
     warnings
   };
 }
@@ -591,13 +629,16 @@ export function estimateBootstrap(
   bootWeights: BootstrapReplicates,
   type: "mean" | "total" = "mean",
   fullSampleEstimate?: number,
-  weightCol = "weight"
+  weightCol = "weight",
+  /** Design degrees of freedom. Replicate count adds no design information, so this
+   *  should be the same df the Taylor estimator reports. Infinity => normal quantile. */
+  designDf = Infinity
 ): EstimationResult {
   const N = sample.length;
   const B = bootWeights.B;
 
   if (N === 0 || B === 0) {
-    return { estimate: 0, se: 0, cv: 0, ciLower: 0, ciUpper: 0, deff: 1.0, warnings: [] };
+    return { estimate: 0, se: 0, cv: 0, ciLower: 0, ciUpper: 0, deff: 1.0, df: 0, criticalValue: NaN, warnings: [] };
   }
 
   // 1. Compute full-sample point estimate if not provided
@@ -642,9 +683,11 @@ export function estimateBootstrap(
   const se = Math.sqrt(variance);
   const cv = estimate !== 0 ? se / Math.abs(estimate) : 0;
 
-  // 95% Confidence Interval
-  const ciLower = estimate - 1.96 * se;
-  const ciUpper = estimate + 1.96 * se;
+  // 95% confidence interval at the design degrees of freedom, matching the Taylor
+  // estimator. The number of replicates B does not add design information.
+  const tCrit = criticalValue(0.95, designDf);
+  const ciLower = estimate - tCrit * se;
+  const ciUpper = estimate + tCrit * se;
 
   // 4. Calculate Design Effect (Deff)
   // Deff = V_complex / V_srs
@@ -701,6 +744,8 @@ export function estimateBootstrap(
     ciLower,
     ciUpper,
     deff,
+    df: Number.isFinite(designDf) ? designDf : 0,
+    criticalValue: tCrit,
     // The Rao-Wu bootstrap here is a with-replacement resample of PSUs and applies no
     // finite population correction, so at high sampling fractions it overstates the
     // variance relative to the Taylor estimator. Conservative, but the two engines will
