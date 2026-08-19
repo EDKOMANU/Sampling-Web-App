@@ -237,6 +237,39 @@ assert(taylorEst.se > 0, "Standard error must be greater than zero");
 // stratification. Only assert that it is a usable finite number.
 assert(Number.isFinite(taylorEst.deff) && taylorEst.deff > 0, "Design effect must be finite and positive");
 
+// --- FINITE POPULATION CORRECTION (T8) ---
+// Every draw now emits an `fpc` column holding the sampling fraction.
+const fpcWor = drawSRS(mockFrame, 200, "srswor", "FPC-WOR");
+assert(Math.abs(fpcWor.sample[0].fpc - 200 / 1000) < 1e-9, "SRSWOR must emit fpc = n/N");
+const fpcWr = drawSRS(mockFrame, 200, "srswr", "FPC-WR");
+assert(fpcWr.sample[0].fpc === 0,
+  "SRSWR must emit fpc = 0: with-replacement designs take no finite population correction");
+// Disproportionate allocation on purpose: Urban f_h = 60/600 = 0.10 but
+// Rural f_h = 100/400 = 0.25. Equal fractions would not exercise the guard below.
+const fpcStrat = drawStratified(mockFrame, "stratum", { Urban: 60, Rural: 100 }, "srswor", "FPC-STRAT");
+const urbanRow = fpcStrat.sample.find(r => r.stratum === "Urban");
+const ruralRow = fpcStrat.sample.find(r => r.stratum === "Rural");
+assert(Math.abs(urbanRow.fpc - 60 / 600) < 1e-9, "Stratified must emit per-stratum f_h = n_h/N_h (Urban)");
+assert(Math.abs(ruralRow.fpc - 100 / 400) < 1e-9, "Stratified must emit per-stratum f_h = n_h/N_h (Rural)");
+assert(Math.abs(urbanRow.fpc - ruralRow.fpc) > 1e-6, "test setup: the two stratum fractions must differ");
+console.log(`- FPC emitted: SRSWOR f=${fpcWor.sample[0].fpc}, SRSWR f=${fpcWr.sample[0].fpc}, Urban f_h=${urbanRow.fpc.toFixed(3)}, Rural f_h=${ruralRow.fpc.toFixed(3)}`);
+
+// The correction must actually reduce the standard error.
+const noFpc = estimateTaylor(fpcStrat.sample, "value", "weight", "stratum");
+const withFpc = estimateTaylor(fpcStrat.sample, "value", "weight", "stratum", undefined, "fpc");
+assert(withFpc.se < noFpc.se, "Applying the FPC must reduce the standard error");
+assert(withFpc.warnings.length === 0, "A well-formed stratified design must raise no FPC warnings");
+console.log(`  * SE without FPC: ${noFpc.se.toFixed(4)} -> with FPC: ${withFpc.se.toFixed(4)}`);
+
+// GUARD: analysing a stratified sample without declaring the strata puts unequal f_h
+// into one group. The correction must be REFUSED, not silently averaged.
+const misdeclared = estimateTaylor(fpcStrat.sample, "value", "weight", undefined, undefined, "fpc");
+assert(misdeclared.warnings.some(w => w.code === "FPC_NOT_CONSTANT_WITHIN_STRATUM"),
+  "Mismatched strata declaration must raise FPC_NOT_CONSTANT_WITHIN_STRATUM");
+assert(misdeclared.se >= noFpc.se * 0.99,
+  "When the FPC is refused the SE must stay conservative, not shrink");
+console.log("  * Mismatched strata: correction correctly refused, SE stayed conservative");
+
 // Rao-Wu Stratified Cluster Bootstrap Replicate Weight Generation
 const bootWeights = generateBootstrapWeights(raked.sample, 50, "weight", "stratum", undefined, "TEST-SEED-BOOT");
 console.log(`- Rao-Wu Stratified Bootstrap: Generated ${bootWeights.replicateWeights[0].length} replicate weights for all ${bootWeights.replicateWeights.length} rows`);

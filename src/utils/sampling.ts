@@ -70,6 +70,7 @@ export function drawSRSWithRng(
       sample: sample.map(row => {
         row.prob = prob;
         row.weight = weight;
+        row.fpc = n / N; // sampling fraction; variance uses (1 - f)
         return row;
       }),
       probabilities: Array(n).fill(prob),
@@ -106,6 +107,10 @@ export function drawSRSWithRng(
       row.selection_count = counts[idx];
       row.prob = prob;
       row.weight = weight;
+      // With-replacement designs get NO finite population correction: a unit can be
+      // selected repeatedly, so the sample is not "using up" a finite population.
+      // Emitting 0 (rather than blank) keeps the column unambiguous on export.
+      row.fpc = 0;
       return row;
     });
 
@@ -139,6 +144,7 @@ export function drawSRSWithRng(
       sample: sample.map(row => {
         row.prob = prob;
         row.weight = weight;
+        row.fpc = n / N; // systematic is treated as SRSWOR for variance purposes
         return row;
       }),
       probabilities: Array(n).fill(prob),
@@ -198,6 +204,9 @@ export function drawStratified(
       newRow.prob = drawRes.probabilities[i];
       newRow.weight = drawRes.weights[i];
       newRow.stratum = stratum;
+      // Per-stratum sampling fraction f_h = n_h / N_h. Re-attached explicitly because
+      // this row is rebuilt from the stratum frame rather than from drawRes.sample.
+      newRow.fpc = n_h / stratumFrame.length;
       
       finalSample.push(newRow);
       finalIndices.push(origRow._orig_idx);
@@ -331,6 +340,11 @@ export function drawPPSWithRng(frame: any[], sizeCol: string, n: number, rng: Rn
     const row = { ...frame[idx] };
     row.prob = pik[idx];
     row.weight = 1 / pik[idx];
+    // PPS systematic carries NO separate finite population correction. The inclusion
+    // probabilities already embed the size measure, and the variance estimator uses the
+    // with-replacement approximation (as R's survey and SAS do when no rate is given).
+    // Applying an FPC on top would understate the variance -- the dangerous direction.
+    row.fpc = 0;
     return row;
   });
 
@@ -388,6 +402,10 @@ export function drawCluster(frame: any[], clusterCol: string, m: number, seed: S
       row.prob = prob;
       row.weight = weight;
       row.cluster_id = key;
+      // Cluster FPC is m/M at the PSU level, not an element-level fraction. Writing it
+      // on every element row is safe because the variance estimator aggregates to PSU
+      // level first and then applies (1 - f) once per stratum.
+      row.fpc = m / M;
 
       finalSample.push(row);
       finalIndices.push(unit._orig_idx);
@@ -517,8 +535,17 @@ export function drawMultistage(
           
           if (sIdx === 0) {
             newRec.overall_prob = unitProb;
+            // FPC applies at the FIRST STAGE ONLY. This estimator is an ultimate-cluster
+            // estimator: it collapses everything below the PSU into the PSU total, so the
+            // between-PSU variance already contains the later-stage contributions and
+            // there is nothing separate to correct. Emitting the PRODUCT of the stage
+            // fractions would be wrong -- it is near zero, so (1-f) would be ~1 while
+            // telling the user a correction had been applied.
+            newRec.fpc = nToSelect / N_units;
           } else {
             newRec.overall_prob = (rec.overall_prob || 1.0) * unitProb;
+            // Preserve the first-stage fpc set above; later stages contribute none.
+            newRec.fpc = rec.fpc ?? 0;
           }
           
           newRec.prob = newRec.overall_prob;

@@ -1104,6 +1104,15 @@ Seed: ${seedInfo.canonical}
     );
 
     setTaylorResults(res);
+
+    // Surface methodological problems rather than quietly returning a plausible number.
+    const problems = res.warnings || [];
+    if (problems.length > 0) {
+      alert(
+        `Estimate computed, with ${problems.length} note${problems.length === 1 ? '' : 's'} on the finite population correction:\n\n`
+        + problems.map(w => `${w.severity === 'error' ? '[NOT APPLIED] ' : ''}${w.message}`).join('\n\n')
+      );
+    }
   };
 
   const handleCalculateBootstrapVariance = async () => {
@@ -3887,13 +3896,21 @@ Seed: ${seedInfo.canonical}
 
                   <div>
                     <label className="block text-xs font-semibold text-gray-400 mb-1">FPC Column (Optional, Taylor Only)</label>
+                    <p className="text-[10px] text-gray-400 mb-1.5 leading-relaxed">
+                      Drawn samples carry an <span className="font-mono">fpc</span> column holding the
+                      sampling fraction. Left unset, no correction is applied and standard errors are
+                      conservative. It is not selected automatically because the correction is only
+                      valid when the Strata Column matches the design actually drawn.
+                    </p>
                     <select
                       value={varianceFpcCol}
                       onChange={(e) => setVarianceFpcCol(e.target.value)}
                       className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none"
                     >
-                      <option value="">-- Select FPC Column --</option>
-                      {weightedSample.length > 0 && Object.keys(weightedSample[0]).map(c => <option key={c} value={c}>{c}</option>)}
+                      <option value="">-- None (no correction) --</option>
+                      {weightedSample.length > 0 && Object.keys(weightedSample[0]).map(c => (
+                        <option key={c} value={c}>{c === 'fpc' ? 'fpc (from this draw)' : c}</option>
+                      ))}
                     </select>
                   </div>
 

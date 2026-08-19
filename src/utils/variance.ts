@@ -14,6 +14,12 @@
 import type { SeedInput } from './random';
 import { deriveStream } from './random';
 
+export interface VarianceWarning {
+  severity: 'error' | 'warning';
+  code: string;
+  message: string;
+}
+
 export interface EstimationResult {
   estimate: number;
   se: number;
@@ -21,6 +27,7 @@ export interface EstimationResult {
   ciLower: number;
   ciUpper: number;
   deff: number;
+  warnings: VarianceWarning[];
 }
 
 /**
@@ -41,9 +48,10 @@ export function estimateTaylor(
   fpcCol?: string,
   type: "mean" | "total" = "mean"
 ): EstimationResult {
+  const warnings: VarianceWarning[] = [];
   const n = sample.length;
   if (n === 0) {
-    return { estimate: 0, se: 0, cv: 0, ciLower: 0, ciUpper: 0, deff: 1.0 };
+    return { estimate: 0, se: 0, cv: 0, ciLower: 0, ciUpper: 0, deff: 1.0, warnings };
   }
 
   // 1. Calculate point estimate
@@ -127,9 +135,60 @@ export function estimateTaylor(
       });
     });
 
-    // FPC calculation: use the average FPC in the stratum (or 0 if not provided)
-    const avgFpc = fpcCount > 0 ? avgFpcAccumulator / fpcCount : 0;
-    const fpcMultiplier = 1 - avgFpc;
+    // --- Finite population correction ---
+    // The correction is a single per-stratum quantity, but it is carried on every row.
+    // Averaging rows is only valid if the value is CONSTANT within the stratum. It is
+    // not constant when the declared stratification does not match the design that was
+    // actually drawn -- e.g. a stratified sample analysed with the strata column left
+    // blank puts every stratum into one group, and the row-average of differing f_h
+    // becomes a meaningless number that still silently shrinks the variance.
+    // R's survey package rejects this outright ("fpc not constant within strata").
+    let fpcMultiplier = 1;
+
+    if (fpcCount > 0) {
+      let fMin = Infinity;
+      let fMax = -Infinity;
+      psuKeys.forEach(c => {
+        grp.psuMap[c].fpcList.forEach(f => {
+          if (f < fMin) fMin = f;
+          if (f > fMax) fMax = f;
+        });
+      });
+
+      const avgFpc = avgFpcAccumulator / fpcCount;
+
+      if (fMax - fMin > 1e-9) {
+        // Refuse to apply a correction we cannot justify. Omitting a legitimate FPC is
+        // conservative (SEs slightly too large); applying an unjustified one is not.
+        warnings.push({
+          severity: 'error',
+          code: 'FPC_NOT_CONSTANT_WITHIN_STRATUM',
+          message: `Stratum "${stratum}": the finite population correction varies across rows `
+            + `(${fMin.toFixed(4)} to ${fMax.toFixed(4)}). It must be a single value per stratum. `
+            + `This usually means the Strata Column does not match the design the sample was drawn under. `
+            + `No correction was applied for this stratum, so its standard error is conservative.`
+        });
+      } else if (avgFpc < 0 || avgFpc > 1) {
+        warnings.push({
+          severity: 'error',
+          code: 'FPC_OUT_OF_RANGE',
+          message: `Stratum "${stratum}": sampling fraction ${avgFpc.toFixed(4)} is outside [0, 1]. `
+            + `A fraction above 1 means the sample size exceeds the population size for this stratum. `
+            + `Supply the fraction n/N, not the population size N. No correction was applied.`
+        });
+      } else {
+        fpcMultiplier = 1 - avgFpc;
+        if (avgFpc === 1) {
+          warnings.push({
+            severity: 'warning',
+            code: 'FPC_CENSUS_STRATUM',
+            message: `Stratum "${stratum}" was fully enumerated (f = 1), so it contributes zero `
+              + `sampling variance. This is correct for a take-all stratum, but if it was not `
+              + `intended, check the population size supplied for it.`
+          });
+        }
+      }
+    }
 
     const stratumVariance = fpcMultiplier * (n_h / (n_h - 1)) * sumSqDiff;
     totalVariance += stratumVariance;
@@ -198,7 +257,8 @@ export function estimateTaylor(
     cv,
     ciLower,
     ciUpper,
-    deff
+    deff,
+    warnings
   };
 }
 
@@ -332,7 +392,7 @@ export function estimateBootstrap(
   const B = bootWeights.B;
 
   if (N === 0 || B === 0) {
-    return { estimate: 0, se: 0, cv: 0, ciLower: 0, ciUpper: 0, deff: 1.0 };
+    return { estimate: 0, se: 0, cv: 0, ciLower: 0, ciUpper: 0, deff: 1.0, warnings: [] };
   }
 
   // 1. Compute full-sample point estimate if not provided
@@ -435,6 +495,11 @@ export function estimateBootstrap(
     cv,
     ciLower,
     ciUpper,
-    deff
+    deff,
+    // The Rao-Wu bootstrap here is a with-replacement resample of PSUs and applies no
+    // finite population correction, so at high sampling fractions it overstates the
+    // variance relative to the Taylor estimator. Conservative, but the two engines will
+    // disagree and the user should know why.
+    warnings: []
   };
 }

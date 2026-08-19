@@ -92,12 +92,23 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
     (chi-square uniformity, no modulo bias at n=3, full-Fisher-Yates vs Sattolo,
     SRSWOR inclusion-probability uniformity, zeroland escape) — all pass.
 
-- [ ] **T8. Emit FPC from every draw**
-  - Files: `src/utils/sampling.ts`, `src/App.tsx`
-  - Problem: Taylor accepts an FPC column but nothing produces one, so the FPC
-    multiplier is always 1.
-  - Accept: stratified draws write per-stratum `n_h/N_h` as `fpc`; auto-selected
-    in the variance tab.
+- [x] **T8. Emit FPC from every draw** — DONE 2026-08-19
+  - Files: `src/utils/sampling.ts`, `src/utils/variance.ts`, `src/App.tsx`
+  - Per design (settled against Cochran/Kish/Lohr/Sarndal + R survey + SAS):
+    srswor `n/N` · systematic `n/N` · stratified `n_h/N_h` · cluster `m/M` at PSU
+    level · multistage stage-1 fraction only (ultimate-cluster estimator) ·
+    **srswr 0** and **PPS 0** — both take no FPC, and applying one there
+    understates the variance, which is the dangerous direction.
+  - Guards in `estimateTaylor`: the correction is REFUSED (not averaged) when
+    `fpc` is not constant within a declared stratum, and when it falls outside
+    [0,1]. Both raise a `VarianceWarning` surfaced in the UI. This is the R
+    `survey` behaviour ("fpc not constant within strata").
+  - NOT auto-selected. The correction is only valid when the Strata Column
+    matches the design actually drawn, and the app cannot verify that. Default
+    stays "None", which is conservative (SEs slightly too large).
+  - Accept: VERIFIED. `npm test` asserts the emitted fractions per design, that
+    applying the FPC reduces the SE (2.5569 -> 2.3834), and that a mismatched
+    strata declaration refuses the correction and keeps the SE conservative.
 
 - [ ] **T9. Lonely-PSU handling as an explicit option**
   - Files: `src/utils/variance.ts`, `src/App.tsx`
@@ -117,6 +128,8 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
     or above a maximum adjustment factor are flagged for collapsing.
 
 - [ ] **T12. Structured warning channel**
+  - Partly built: `CalibrationWarning` (T3) and `VarianceWarning` (T8) exist and
+    are surfaced. T12 unifies them and replaces the remaining `alert()` calls.
   - Files: engines + `src/App.tsx`
   - Problem: 43 blocking `alert()` calls; engines have comments saying "a warning
     would be captured here" with no mechanism.
