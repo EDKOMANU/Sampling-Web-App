@@ -68,7 +68,10 @@ export function calculateWeightSummary(weights: number[]): WeightSummary {
  * @param classCol Column name representing the weighting classes (e.g., "Region")
  * @param responseCol Binary indicator column representing response (1 = respondent, 0 = non-respondent)
  * @param weightCol Column containing current weights (e.g., "weight" or "base_weight")
- * @returns Modifies the sample array by adding a new weight column `adjusted_weight` and returns the respondents only
+ * @returns Rows with `weightCol` overwritten by the adjusted weight, the pre-adjustment
+ *          value kept as `design_weight`, plus `adjusted_weight` and `adjustment_factor`
+ *          for auditing. Non-respondents get a weight of 0. Respondents are returned
+ *          separately as the input to calibration.
  */
 export function adjustWeightingClass(
   sample: any[],
@@ -115,6 +118,12 @@ export function adjustWeightingClass(
       newRow.adjustment_factor = factor;
       newRow.adjusted_weight = isRespondent ? w * factor : 0;
     }
+
+    // Carry the adjustment into the live weight column. Downstream calibration and
+    // variance estimation read `weightCol`, so without this the adjustment is computed
+    // and then discarded. `design_weight` preserves the pre-adjustment value for audit.
+    newRow.design_weight = w;
+    newRow[weightCol] = newRow.adjusted_weight;
     return newRow;
   });
 
@@ -335,6 +344,9 @@ export function adjustResponsePropensity(
       newRow.adjusted_weight = 0.0;
     }
 
+    // Carry the adjustment into the live weight column (see adjustWeightingClass).
+    newRow.design_weight = w;
+    newRow[weightCol] = newRow.adjusted_weight;
     return newRow;
   });
 
@@ -348,11 +360,19 @@ export interface RakingMargin {
   targets: Record<string, number>; // Marginal target totals (e.g. { "18-34": 45000, "35-54": 55000, "55+": 40000 })
 }
 
+export interface CalibrationWarning {
+  severity: 'error' | 'warning';
+  code: string;
+  message: string;
+}
+
 export interface RakingResult {
   sample: any[];
   converged: boolean;
   iterations: number;
   maxDiscrepancy: number; // Final maximum percentage deviation from target
+  /** Methodological issues detected during calibration. `error` means the result must not be used. */
+  warnings: CalibrationWarning[];
   marginsSummary: {
     column: string;
     category: string;
@@ -385,8 +405,10 @@ export function rakeWeights(
 ): RakingResult {
   const N = sample.length;
   if (N === 0) {
-    return { sample: [], converged: false, iterations: 0, maxDiscrepancy: 0, marginsSummary: [] };
+    return { sample: [], converged: false, iterations: 0, maxDiscrepancy: 0, marginsSummary: [], warnings: [] };
   }
+
+  const warnings: CalibrationWarning[] = [];
 
   // Create workspace copy of sample with weight trackers
   const workingSample = sample.map(row => ({
@@ -439,7 +461,13 @@ export function rakeWeights(
       Object.keys(targets).forEach(cat => {
         targets[cat] *= scale;
       });
-      // A warning would be captured here for the UI logs
+      warnings.push({
+        severity: 'warning',
+        code: 'TARGET_CATEGORY_COLLAPSED',
+        message: `"${col}": ${inactiveTargetSum.toLocaleString()} population units sit in target categories with zero respondents. `
+          + `Their totals were redistributed across the remaining categories (scaled by ${scale.toFixed(4)}). `
+          + `Estimates for those categories cannot be produced from this sample.`
+      });
     }
 
     return { column: col, targets };
@@ -593,12 +621,25 @@ export function rakeWeights(
     return newRow;
   });
 
+  if (!converged) {
+    warnings.push({
+      severity: 'warning',
+      code: 'RAKING_NOT_CONVERGED',
+      message: `Raking stopped after ${iter} iterations with a maximum margin deviation of `
+        + `${(lastMaxDiscrepancy * 100).toFixed(2)}%, above the ${(tolerance * 100).toFixed(2)}% tolerance. `
+        + (trimBounds
+            ? `Trimming bounds [${trimBounds[0]}, ${trimBounds[1]}] are active and are clipping weights back after each margin is fitted, which can prevent convergence. Widen the bounds or accept the deviation.`
+            : `Check that every margin's targets sum to the same population total.`)
+    });
+  }
+
   return {
     sample: finalSample,
     converged,
     iterations: iter,
     maxDiscrepancy: lastMaxDiscrepancy,
-    marginsSummary
+    marginsSummary,
+    warnings
   };
 }
 
@@ -673,8 +714,10 @@ export function calibrateLinear(
 ): RakingResult {
   const N = sample.length;
   if (N === 0) {
-    return { sample: [], converged: false, iterations: 0, maxDiscrepancy: 0, marginsSummary: [] };
+    return { sample: [], converged: false, iterations: 0, maxDiscrepancy: 0, marginsSummary: [], warnings: [] };
   }
+
+  const warnings: CalibrationWarning[] = [];
 
   // Detect and resolve category mismatches (census categories with zero survey respondents)
   const sampleCategoriesPerMargin: Record<string, Set<string>> = {};
@@ -711,6 +754,12 @@ export function calibrateLinear(
       Object.keys(targets).forEach(cat => {
         targets[cat] *= scale;
       });
+      warnings.push({
+        severity: 'warning',
+        code: 'TARGET_CATEGORY_COLLAPSED',
+        message: `"${col}": ${inactiveTargetSum.toLocaleString()} population units sit in target categories with zero respondents. `
+          + `Their totals were redistributed across the remaining categories (scaled by ${scale.toFixed(4)}).`
+      });
     }
 
     return { column: col, targets };
@@ -731,7 +780,8 @@ export function calibrateLinear(
       converged: true, 
       iterations: 0, 
       maxDiscrepancy: 0, 
-      marginsSummary: [] 
+      marginsSummary: [],
+      warnings
     };
   }
 
@@ -798,6 +848,13 @@ export function calibrateLinear(
   } catch (err) {
     lambda = Array(K).fill(0);
     converged = false;
+    warnings.push({
+      severity: 'error',
+      code: 'CALIBRATION_SYSTEM_SINGULAR',
+      message: 'The calibration system could not be solved. This usually means two margins '
+        + 'describe the same partition of the sample, or a category has no respondents. '
+        + 'Remove the redundant margin and try again.'
+    });
   }
 
   // Compute calibrated weights
@@ -814,6 +871,32 @@ export function calibrateLinear(
     };
   });
 
+  // Linear calibration solves w = d(1 + x'lambda), which is unbounded below. When a
+  // calibration cell is small or the targets sit far from the sample, the multiplier
+  // goes negative. Negative weights are not a usable survey weight -- they make totals
+  // and variances meaningless -- so this is an error, not a warning.
+  // (Deville & Sarndal 1992; Sarndal 2016 name this as the principal drawback of GREG,
+  // and it is the reason the bounded/logit variants exist.)
+  let negativeCount = 0;
+  let minWeight = Infinity;
+  finalSample.forEach(row => {
+    const w = Number(row[weightCol]);
+    if (w < minWeight) minWeight = w;
+    if (!(w > 0)) negativeCount++;
+  });
+
+  if (negativeCount > 0) {
+    converged = false;
+    warnings.push({
+      severity: 'error',
+      code: 'NEGATIVE_WEIGHTS',
+      message: `Linear calibration produced ${negativeCount} non-positive weight`
+        + `${negativeCount === 1 ? '' : 's'} (minimum ${minWeight.toFixed(4)}). `
+        + 'Totals and standard errors computed from these weights are invalid. '
+        + 'Use Raking, or Truncated raking with bounds, which keep every weight positive.'
+    });
+  }
+
   // Calculate final audit report summaries
   const marginsSummary: RakingResult["marginsSummary"] = [];
   margins.forEach(m => {
@@ -828,7 +911,7 @@ export function calibrateLinear(
     finalSample.forEach(row => {
       const cat = String(row[col]);
       if (cat in sampleWeightedSums) {
-        sampleWeightedSums[cat] += row.weight;
+        sampleWeightedSums[cat] += Number(row[weightCol]) || 0;
       }
     });
 
@@ -862,7 +945,8 @@ export function calibrateLinear(
     converged,
     iterations: 1,
     maxDiscrepancy,
-    marginsSummary
+    marginsSummary,
+    warnings
   };
 }
 

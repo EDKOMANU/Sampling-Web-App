@@ -40,9 +40,13 @@ import { Line, Bar } from 'react-chartjs-2';
 // Import our statistical TS utilities
 import { calcCochran, calcSlovin, calcComplexSurvey, allocateStrata } from './utils/samplesize';
 import { drawSRS, drawStratified, drawPPS, drawCluster, drawMultistage } from './utils/sampling';
+import { generateSeed, canonicalizeSeed, createRng } from './utils/random';
+
+/** Fixed so the demo frame is byte-identical on every load. */
+const DEMO_FRAME_SEED = 'MRED-DEMO-FRAME-V1';
 import type { StageConfig } from './utils/sampling';
 import { calculateWeightSummary, adjustWeightingClass, adjustResponsePropensity, calibrateWeights } from './utils/weighting';
-import type { RakingMargin } from './utils/weighting';
+import type { RakingMargin, CalibrationWarning } from './utils/weighting';
 import { estimateTaylor, generateBootstrapWeights, estimateBootstrap } from './utils/variance';
 
 import MethodologyHub from './MethodologyHub';
@@ -111,6 +115,11 @@ function App() {
     method: string;
     avgProb: number;
     sumWeight: number;
+    /** Seed the sample was drawn with. Quote this to regenerate the identical sample. */
+    seed: string;
+    /** 16-hex digest of the canonical seed, for the audit trail. */
+    seedFingerprint: string;
+    drawnAt: string;
   } | null>(null);
   const [numClustersToDraw, setNumClustersToDraw] = useState<string>('Auto');
 
@@ -178,6 +187,13 @@ function App() {
   const [isAllocationStale, setIsAllocationStale] = useState<boolean>(true);
 
   const [stratificationDrawCol, setStratificationDrawCol] = useState<string>('');
+
+  // --- Reproducibility ---
+  // The seed is the single value that regenerates a drawn sample. It is generated once
+  // per session, shown to the user, editable, and recorded with the draw so it can be
+  // quoted in a methodology report.
+  const [drawSeed, setDrawSeed] = useState<string>(() => generateSeed());
+  const [bootstrapSeed, setBootstrapSeed] = useState<string>(() => generateSeed());
 
   // Sync stratificationDrawCol and allocStrataCol
   useEffect(() => {
@@ -331,8 +347,12 @@ function App() {
     }
   };
 
-  // Generate Mock Data for sampling demonstration if needed
+  // Generate Mock Data for sampling demonstration if needed.
+  // Seeded from a fixed constant so the demo frame is identical on every load: without
+  // this, the demo path is unreproducible end to end no matter how the draw is seeded,
+  // because the frame itself would differ between sessions.
   const handleLoadDemoFrame = () => {
+    const frameRng = createRng(DEMO_FRAME_SEED, 'demo-frame');
     const demoData = [];
     const regions = ['North', 'South', 'East', 'West'];
     const genders = ['Male', 'Female'];
@@ -340,9 +360,9 @@ function App() {
     
     // Generate 5,000 mock records
     for (let i = 1; i <= 5000; i++) {
-      const region = regions[Math.floor(Math.random() * regions.length)];
-      const gender = genders[Math.floor(Math.random() * genders.length)];
-      const ageGroup = ageGroups[Math.floor(Math.random() * ageGroups.length)];
+      const region = regions[frameRng.nextBelow(regions.length)];
+      const gender = genders[frameRng.nextBelow(genders.length)];
+      const ageGroup = ageGroups[frameRng.nextBelow(ageGroups.length)];
       
       // Correlated income based on region and age
       let baseIncome = 25000;
@@ -351,16 +371,16 @@ function App() {
       if (ageGroup === '35-54') baseIncome += 15000;
       if (ageGroup === '55+') baseIncome += 5000;
       
-      const income = Math.round(baseIncome + (Math.random() - 0.5) * 8000);
+      const income = Math.round(baseIncome + (frameRng.nextFloat() - 0.5) * 8000);
       
       // Response indicator (response rate ~ 75%, lower for young people in the South)
       let responseProb = 0.8;
       if (ageGroup === '18-34') responseProb -= 0.15;
       if (region === 'South') responseProb -= 0.1;
-      const responded = Math.random() < responseProb ? 1 : 0;
+      const responded = frameRng.nextFloat() < responseProb ? 1 : 0;
 
       // Dummy cluster id within region
-      const clusterNum = Math.floor(Math.random() * 20) + 1;
+      const clusterNum = frameRng.nextBelow(20) + 1;
       const clusterId = `${region}_Cluster_${clusterNum}`;
 
       demoData.push({
@@ -784,13 +804,13 @@ function App() {
       let finalN = samplingSampleSize;
 
       if (selectedSamplingMethod === 'srswor') {
-        const res = drawSRS(populationFrame, finalN, 'srswor');
+        const res = drawSRS(populationFrame, finalN, 'srswor', drawSeed);
         result = res.sample;
       } else if (selectedSamplingMethod === 'srswr') {
-        const res = drawSRS(populationFrame, finalN, 'srswr');
+        const res = drawSRS(populationFrame, finalN, 'srswr', drawSeed);
         result = res.sample;
       } else if (selectedSamplingMethod === 'systematic') {
-        const res = drawSRS(populationFrame, finalN, 'systematic');
+        const res = drawSRS(populationFrame, finalN, 'systematic', drawSeed);
         result = res.sample;
       } else if (selectedSamplingMethod === 'stratified' || selectedSamplingMethod === 'stratified_sys') {
         if (!stratificationDrawCol) {
@@ -829,14 +849,14 @@ function App() {
         });
 
         const meth = selectedSamplingMethod === 'stratified_sys' ? 'systematic' : 'srswor';
-        const res = drawStratified(populationFrame, stratificationDrawCol, allocations, meth);
+        const res = drawStratified(populationFrame, stratificationDrawCol, allocations, meth, drawSeed);
         result = res.sample;
       } else if (selectedSamplingMethod === 'pps') {
         if (!ppsSizeCol) {
           alert("Please select a size variable column for PPS.");
           return;
         }
-        const res = drawPPS(populationFrame, ppsSizeCol, finalN);
+        const res = drawPPS(populationFrame, ppsSizeCol, finalN, drawSeed);
         result = res.sample;
 
 
@@ -870,7 +890,7 @@ function App() {
         clustersToDraw = Math.min(M, Math.max(2, Math.round(finalN / avgClusterSize)));
       }
 
-      const res = drawCluster(populationFrame, clusterColName, clustersToDraw);
+      const res = drawCluster(populationFrame, clusterColName, clustersToDraw, drawSeed);
       result = res.sample;
 
         
@@ -881,7 +901,7 @@ function App() {
           alert("Please select sampling unit columns for all stages in multistage draw.");
           return;
         }
-        result = drawMultistage(populationFrame, multistageStages, finalN);
+        result = drawMultistage(populationFrame, multistageStages, finalN, drawSeed);
       }
 
       // Record metadata
@@ -892,15 +912,26 @@ function App() {
       // Pre-populate respondent sample for weighting suite
       setWeightedSample(result);
 
+      const seedInfo = canonicalizeSeed(drawSeed);
       setDrawnMeta({
         n: result.length,
         method: selectedSamplingMethod.toUpperCase(),
         avgProb,
-        sumWeight
+        sumWeight,
+        seed: seedInfo.canonical,
+        seedFingerprint: seedInfo.fingerprint,
+        drawnAt: new Date().toISOString()
       });
 
-      // Jump to dashboard or success status
-      alert(`Success! Successfully drawn a representative sample of ${result.length} units.`);
+      alert(
+        `Drew ${result.length} units.
+
+Seed: ${seedInfo.canonical}
+
+`
+        + 'Record this seed. Re-running the same design on the same frame with this '
+        + 'seed reproduces exactly this sample.'
+      );
     } catch (e: any) {
       alert(`Sampling Error: ${e.message}`);
     }
@@ -980,8 +1011,10 @@ function App() {
       }
 
       // 2. Apply Calibration if margins are set
+      let advisories: CalibrationWarning[] = [];
+
       if (rakingMargins.length > 0) {
-        // Retrieve trimming bounds: GREG does not support trimming, logit uses bounds directly, raking supports custom
+        // Retrieve trimming bounds: GREG does not support trimming, truncated raking uses bounds directly, raking supports custom
         let trimBounds: [number, number] | undefined = undefined;
         if (calibrationMethod === 'logit') {
           trimBounds = [logitLower, logitUpper];
@@ -998,6 +1031,23 @@ function App() {
           50, 
           0.001
         );
+        const blockers = (rakeRes.warnings || []).filter(w => w.severity === 'error');
+
+        if (blockers.length > 0) {
+          // The weights are not usable. Do not publish them to the rest of the app,
+          // otherwise the variance engine will happily produce standard errors for them.
+          setWeightedSample([]);
+          setRakingResult(rakeRes);
+          setTaylorResults(null);
+          setBootstrapResults(null);
+          alert(
+            'Calibration failed — weights were not applied.\n\n'
+            + blockers.map(w => `• ${w.message}`).join('\n\n')
+          );
+          return;
+        }
+
+        advisories = rakeRes.warnings || [];
         setWeightedSample(rakeRes.sample);
         setRakingResult(rakeRes);
       } else {
@@ -1007,7 +1057,8 @@ function App() {
           converged: true,
           iterations: 0,
           maxDiscrepancy: 0,
-          marginsSummary: []
+          marginsSummary: [],
+          warnings: []
         });
       }
 
@@ -1015,7 +1066,12 @@ function App() {
       setTaylorResults(null);
       setBootstrapResults(null);
 
-      alert("Weighting & calibration engine successfully computed weights!");
+      alert(
+        advisories.length > 0
+          ? `Weights computed, with ${advisories.length} advisory note${advisories.length === 1 ? '' : 's'}:\n\n`
+            + advisories.map(w => `• ${w.message}`).join('\n\n')
+          : "Weighting & calibration engine successfully computed weights!"
+      );
     } catch (e: any) {
       alert(`Weighting Error: ${e.message}`);
     }
@@ -1071,7 +1127,8 @@ function App() {
         bootstrapReps, 
         'base_weight', // Start from base weights before raking
         varianceStrataCol || undefined, 
-        varianceClusterCol || undefined
+        varianceClusterCol || undefined,
+        bootstrapSeed
       );
 
       // 2. If Calibration is active, RE-CALIBRATE each replicate weight column!
@@ -2395,6 +2452,33 @@ function App() {
                     </div>
                   )}
 
+                  {/* Reproducibility seed */}
+                  <div className="p-3 rounded-xl bg-white/5 border border-white/10 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[11px] font-semibold text-gray-300 tracking-wide">
+                        Random Seed
+                      </label>
+                      <button
+                        onClick={() => setDrawSeed(generateSeed())}
+                        className="text-[10px] font-mono px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-indigo-300 transition-colors"
+                      >
+                        Generate new
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={drawSeed}
+                      onChange={(e) => setDrawSeed(e.target.value)}
+                      spellCheck={false}
+                      placeholder="e.g. K4T9-QM2X-7BHD"
+                      className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-indigo-500"
+                    />
+                    <p className="text-[10px] text-gray-400 leading-relaxed">
+                      The same seed, frame and design always produce the same sample.
+                      Record it with your results so the draw can be reproduced and audited.
+                    </p>
+                  </div>
+
                   <button
                     onClick={handleDrawSample}
                     className="w-full py-3 bg-gradient-to-tr from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 rounded-xl hover-lift text-white font-bold text-sm tracking-wide shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center gap-2"
@@ -2423,6 +2507,26 @@ function App() {
                       <div className="bg-purple-600/10 border border-purple-500/25 p-5 rounded-2xl">
                         <span className="text-[10px] text-gray-500 font-semibold tracking-wider font-mono block">SUM OF WEIGHTS (sum w_i)</span>
                         <p className="text-3xl font-extrabold text-white mt-1">{Math.round(drawnMeta.sumWeight).toLocaleString()}</p>
+                      </div>
+
+                      {/* Provenance: everything needed to regenerate this exact sample */}
+                      <div className="col-span-3 bg-white/5 border border-white/10 p-4 rounded-2xl flex flex-wrap items-center gap-x-8 gap-y-3">
+                        <div>
+                          <span className="text-[10px] text-gray-500 font-semibold tracking-wider font-mono block">SEED</span>
+                          <p className="text-sm font-mono font-bold text-indigo-300 mt-1 select-all">{drawnMeta.seed}</p>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-gray-500 font-semibold tracking-wider font-mono block">SEED FINGERPRINT</span>
+                          <p className="text-sm font-mono text-gray-300 mt-1 select-all">{drawnMeta.seedFingerprint}</p>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-gray-500 font-semibold tracking-wider font-mono block">DESIGN</span>
+                          <p className="text-sm font-mono text-gray-300 mt-1">{drawnMeta.method}</p>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-gray-500 font-semibold tracking-wider font-mono block">DRAWN AT (UTC)</span>
+                          <p className="text-sm font-mono text-gray-300 mt-1">{drawnMeta.drawnAt.replace('T', ' ').slice(0, 19)}</p>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -2823,16 +2927,16 @@ function App() {
                           >
                             <option value="raking">Multiplicative Raking (Ratio / IPF)</option>
                             <option value="linear">Linear Calibration (GREG Solver)</option>
-                            <option value="logit">Logit Calibration (Bounded Ratio)</option>
+                            <option value="logit">Truncated Raking (Bounded Ratio)</option>
                           </select>
                           <span className="text-[9px] text-gray-500 mt-1 block">
                             {calibrationMethod === 'raking' && "IPF ratio scaling. Always positive; maps category totals iteratively."}
                             {calibrationMethod === 'linear' && "Generalized Regression (GREG). Exact single-step Lagrange solution; weights can be negative."}
-                            {calibrationMethod === 'logit' && "Restricts weight multipliers strictly inside custom upper/lower boundaries."}
+                            {calibrationMethod === 'logit' && "Raking with weight multipliers clipped into custom bounds after each margin. Bounds are always respected; margins may not be met exactly when they bind — check the discrepancy below."}
                           </span>
                         </div>
 
-                        {/* Logit Calibration boundaries */}
+                        {/* Truncated raking bounds */}
                         {calibrationMethod === 'logit' && (
                           <div className="grid grid-cols-2 gap-3 text-[10px] bg-indigo-600/5 p-3 rounded-xl border border-indigo-500/10">
                             <div>
@@ -3168,7 +3272,9 @@ function App() {
                      c !== 'prob' && 
                      c !== 'Responded' &&
                      c !== 'propensity_score' &&
-                     c !== 'adjustment_factor'
+                     c !== 'adjustment_factor' &&
+                     c !== 'design_weight' &&
+                     c !== 'adjusted_weight'
               );
 
               // 1. Calculate overall summary statistics
@@ -3813,6 +3919,29 @@ function App() {
                         onChange={(e) => setBootstrapReps(parseInt(e.target.value) || 10)}
                         className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
                       />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-semibold text-gray-400">Replicate Seed</label>
+                        <button
+                          onClick={() => setBootstrapSeed(generateSeed())}
+                          className="text-[10px] font-mono px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-pink-300 transition-colors"
+                        >
+                          Generate new
+                        </button>
+                      </div>
+                      <input
+                        type="text"
+                        value={bootstrapSeed}
+                        onChange={(e) => setBootstrapSeed(e.target.value)}
+                        spellCheck={false}
+                        className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-pink-500"
+                      />
+                      <p className="text-[10px] text-gray-400 mt-1 leading-relaxed">
+                        Replicate weights are regenerated exactly from this seed, so a
+                        published standard error can be reproduced.
+                      </p>
                     </div>
 
                     <button

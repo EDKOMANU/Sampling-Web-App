@@ -6,7 +6,13 @@
  * 1. Stratified Taylor Series Linearization for Means and Totals.
  * 2. Rao-Wu / McCarthy-Snowden Stratified Cluster Bootstrap Resampling.
  * 3. Standard Errors, CVs, and Design Effects (Deff) calculations with R-equivalent accuracy.
+ *
+ * REPRODUCIBILITY: bootstrap replicate weights are generated from a seed, with one
+ * substream per (replicate, stratum) keyed by the stratum label. See utils/random.ts.
  */
+
+import type { SeedInput } from './random';
+import { deriveStream } from './random';
 
 export interface EstimationResult {
   estimate: number;
@@ -217,7 +223,8 @@ export function generateBootstrapWeights(
   B = 100,
   weightCol = "weight",
   strataCol?: string,
-  clusterCol?: string
+  clusterCol?: string,
+  seed: SeedInput = 0
 ): BootstrapReplicates {
   const N = sample.length;
   const replicateWeights: number[][] = Array.from({ length: N }, () => Array(B).fill(0));
@@ -245,7 +252,9 @@ export function generateBootstrapWeights(
   for (let b = 0; b < B; b++) {
     Object.keys(strataMap).forEach(stratum => {
       const clusterMap = strataMap[stratum];
-      const clusterKeys = Object.keys(clusterMap);
+      // Sorted so the index -> cluster mapping does not depend on Object.keys()
+      // ordering, which V8 reorders for integer-like keys such as bare cluster codes.
+      const clusterKeys = Object.keys(clusterMap).sort();
       const n_h = clusterKeys.length; // Number of clusters in stratum
 
       if (n_h <= 1) {
@@ -267,8 +276,13 @@ export function generateBootstrapWeights(
         drawnClusterCounts[k] = 0;
       });
 
+      // One substream per (replicate, stratum), keyed by the stratum's label. This is
+      // what makes the replicate weights reproducible: strata with n_h <= 1 return
+      // early and consume no draws, so a single shared stream would make every
+      // stratum's draws depend on how many lonely strata happened to precede it.
+      const repRng = deriveStream(seed, `boot:${b}`, stratum);
       for (let draw = 0; draw < n_h - 1; draw++) {
-        const randCluster = clusterKeys[Math.floor(Math.random() * n_h)];
+        const randCluster = clusterKeys[repRng.nextBelow(n_h)];
         drawnClusterCounts[randCluster]++;
       }
 
@@ -311,7 +325,8 @@ export function estimateBootstrap(
   targetCol: string,
   bootWeights: BootstrapReplicates,
   type: "mean" | "total" = "mean",
-  fullSampleEstimate?: number
+  fullSampleEstimate?: number,
+  weightCol = "weight"
 ): EstimationResult {
   const N = sample.length;
   const B = bootWeights.B;
@@ -327,7 +342,7 @@ export function estimateBootstrap(
     let sumW = 0;
     sample.forEach(row => {
       const y = Number(row[targetCol]) || 0;
-      const w = Number(row["weight"]) || 1.0;
+      const w = Number(row[weightCol]) || 1.0;
       weightedSumY += w * y;
       sumW += w;
     });
@@ -375,7 +390,7 @@ export function estimateBootstrap(
     let sumW_srs = 0;
     sample.forEach(row => {
       const y = Number(row[targetCol]) || 0;
-      const w = Number(row["weight"]) || 1.0;
+      const w = Number(row[weightCol]) || 1.0;
       meanY += w * y;
       sumW_srs += w;
     });
@@ -385,7 +400,7 @@ export function estimateBootstrap(
     let sumW_minus_1 = 0;
     sample.forEach(row => {
       const y = Number(row[targetCol]) || 0;
-      const w = Number(row["weight"]) || 1.0;
+      const w = Number(row[weightCol]) || 1.0;
       varY += w * Math.pow(y - meanY, 2);
       sumW_minus_1 += w;
     });
@@ -396,7 +411,7 @@ export function estimateBootstrap(
     let sumW_srs = 0;
     sample.forEach(row => {
       const y = Number(row[targetCol]) || 0;
-      const w = Number(row["weight"]) || 1.0;
+      const w = Number(row[weightCol]) || 1.0;
       meanY += w * y;
       sumW_srs += w;
     });
@@ -405,7 +420,7 @@ export function estimateBootstrap(
     let varY = 0;
     sample.forEach(row => {
       const y = Number(row[targetCol]) || 0;
-      const w = Number(row["weight"]) || 1.0;
+      const w = Number(row[weightCol]) || 1.0;
       varY += w * Math.pow(y - meanY, 2);
     });
     const s2Y = sumW_srs > 1 ? varY / (sumW_srs - 1) : 0;

@@ -1,7 +1,18 @@
 /**
  * Official Statistics Sampling & Weighting System - Sampling Draw Engine
  * Written in pure TypeScript with absolute mathematical precision, corrected algorithms, and robust safeguards.
+ *
+ * REPRODUCIBILITY: every draw takes a `seed` and is exactly regenerable from it.
+ * Multi-part designs (stratified, cluster, multistage) derive an independent substream
+ * per stratum/cluster/stage keyed by the group's LABEL, never by its position. That
+ * makes a draw invariant to iteration order -- important because `Object.keys()`
+ * reorders integer-like keys into ascending numeric order regardless of insertion
+ * order, so a position-keyed scheme would change the sample when a stratum is renamed.
+ * It also means adding a stratum leaves every other stratum's draw untouched.
  */
+
+import type { Rng, SeedInput } from './random';
+import { createRng, deriveStream, selectIndicesWithoutReplacement, selectIndicesWithReplacement } from './random';
 
 export interface SampleResult {
   sample: any[];
@@ -11,30 +22,46 @@ export interface SampleResult {
 }
 
 /**
- * Draw a Simple Random Sample (SRS) or Systematic Sample
+ * Draw a Simple Random Sample (SRS) or Systematic Sample.
+ *
  * @param frame Array of objects representing the population frame
  * @param n Sample size to draw
  * @param method "srswor" (without replacement), "srswr" (with replacement), or "systematic"
- * @returns SampleResult
+ * @param seed Seed for the draw. The same seed and frame always produce the same sample.
  */
-export function drawSRS(frame: any[], n: number, method: "srswor" | "srswr" | "systematic"): SampleResult {
+export function drawSRS(
+  frame: any[],
+  n: number,
+  method: "srswor" | "srswr" | "systematic",
+  seed: SeedInput
+): SampleResult {
+  return drawSRSWithRng(frame, n, method, createRng(seed, `srs:${method}`));
+}
+
+/**
+ * Internal SRS draw against an already-derived stream.
+ *
+ * Multi-part designs (stratified, cluster, multistage) call this directly with a
+ * per-group substream so that each group draws independently and the result does not
+ * depend on the order groups happen to be visited in.
+ */
+export function drawSRSWithRng(
+  frame: any[],
+  n: number,
+  method: "srswor" | "srswr" | "systematic",
+  rng: Rng
+): SampleResult {
   const N = frame.length;
   if (N === 0) throw new Error("Sampling frame is empty.");
   if (n <= 0) return { sample: [], probabilities: [], weights: [], indices: [] };
 
   if (method === "srswor") {
     if (n > N) throw new Error(`Sample size (n=${n}) cannot exceed population size (N=${N}) for sampling without replacement.`);
-    
-    // Draw without replacement using Reservoir Sampling or Fisher-Yates shuffle subset
-    const indices = Array.from({ length: N }, (_, i) => i);
-    for (let i = 0; i < n; i++) {
-      const randIdx = Math.floor(Math.random() * (N - i)) + i;
-      const temp = indices[i];
-      indices[i] = indices[randIdx];
-      indices[randIdx] = temp;
-    }
-    
-    const selectedIndices = indices.slice(0, n).sort((a, b) => a - b);
+
+    // Partial Fisher-Yates over the frame indices. `selectIndicesWithoutReplacement`
+    // returns draw order; ascending order below is a presentation choice only.
+    const drawn = selectIndicesWithoutReplacement(rng, N, n);
+    const selectedIndices = [...drawn].sort((a, b) => a - b);
     const sample = selectedIndices.map(idx => ({ ...frame[idx] }));
     const prob = n / N;
     const weight = N / n;
@@ -51,11 +78,8 @@ export function drawSRS(frame: any[], n: number, method: "srswor" | "srswr" | "s
     };
 
   } else if (method === "srswr") {
-    // --- CRITICAL BUG FIX: Duplicates repeated and exact weights applied ---
-    const selectedIndices: number[] = [];
-    for (let i = 0; i < n; i++) {
-      selectedIndices.push(Math.floor(Math.random() * N));
-    }
+    // Duplicates are intentional and are retained (Hansen-Hurwitz, see weights below).
+    const selectedIndices = selectIndicesWithReplacement(rng, N, n);
     selectedIndices.sort((a, b) => a - b);
 
     // Calculate count of selection per unit
@@ -64,24 +88,31 @@ export function drawSRS(frame: any[], n: number, method: "srswor" | "srswr" | "s
       counts[idx] = (counts[idx] || 0) + 1;
     });
 
+    // Hansen-Hurwitz estimator. Each of the n draws is an independent selection with
+    // per-draw probability p = 1/N, so the design weight attached to a DRAW is
+    // 1/(n*p) = N/n. The weights then sum to exactly N however many duplicates occur.
+    //
+    // Do NOT use the distinct-unit inclusion probability pi = 1 - (1 - 1/N)^n here.
+    // That weight belongs to a de-duplicated sample; applying it to every draw while
+    // also keeping the duplicates double-counts. sum(w) overshot N by 10% at
+    // N=1000/n=200 and by 58% at n=N.
+    const prob = 1 / N;   // per-draw selection probability
+    const weight = N / n; // Hansen-Hurwitz design weight per draw
+
     const sample = selectedIndices.map((idx, step) => {
       const row = { ...frame[idx] };
       // Unique SSU ID for duplicates
       row._subsample_id = `${row.ID || idx}_copy_${step}`;
       row.selection_count = counts[idx];
-      
-      // Inclusion probability for drawing at least once in n trials:
-      // pi_i = 1 - (1 - 1/N)^n
-      const prob = 1 - Math.pow(1 - 1 / N, n);
       row.prob = prob;
-      row.weight = 1 / prob;
+      row.weight = weight;
       return row;
     });
 
     return {
       sample,
-      probabilities: sample.map(r => r.prob),
-      weights: sample.map(r => r.weight),
+      probabilities: Array(n).fill(prob),
+      weights: Array(n).fill(weight),
       indices: selectedIndices
     };
 
@@ -89,7 +120,9 @@ export function drawSRS(frame: any[], n: number, method: "srswor" | "srswr" | "s
     // --- CRITICAL BUG FIX: Systematic with Fractional Interval Safeguard ---
     // k is a fractional interval (N / n)
     const k = N / n;
-    const r = Math.random() * k; // random start strictly in [0, k)
+    // Random start strictly in [0, k). `nextUnitInterval` is exactly [0, 1) -- it can
+    // return 0 but never 1 -- which is what makes the bound proof below hold.
+    const r = rng.nextUnitInterval() * k;
     
     const selectedIndices: number[] = [];
     for (let i = 0; i < n; i++) {
@@ -123,7 +156,8 @@ export function drawStratified(
   frame: any[],
   strataCol: string,
   sizes: Record<string, number>,
-  method: "srswor" | "systematic" = "srswor"
+  method: "srswor" | "systematic" = "srswor",
+  seed: SeedInput = 0
 ): SampleResult {
   const strataGroups: Record<string, any[]> = {};
   
@@ -148,8 +182,15 @@ export function drawStratified(
 
     if (n_h <= 0) return; // Skip if allocation is 0
 
-    // Draw from the stratum slice
-    const drawRes = drawSRS(stratumFrame, n_h, method === "systematic" ? "systematic" : "srswor");
+    // Each stratum draws from its own substream, keyed by the stratum's own label.
+    // Consequence: the draw is identical however the strata are ordered, and adding
+    // or removing a stratum does not disturb any other stratum's selection.
+    const drawRes = drawSRSWithRng(
+      stratumFrame,
+      n_h,
+      method === "systematic" ? "systematic" : "srswor",
+      deriveStream(seed, 'stratum', stratum)
+    );
     
     drawRes.sample.forEach((_, i) => {
       const origRow = stratumFrame[drawRes.indices[i]];
@@ -244,7 +285,11 @@ export function calculatePPSInclusionProbabilities(sizes: number[], n: number): 
  * Draw a Probability Proportional to Size (PPS) Systematic Sample
  * Uses Hanurav-Vijayan / systematic PPS method. Highly robust and fits all general n.
  */
-export function drawPPS(frame: any[], sizeCol: string, n: number): SampleResult {
+export function drawPPS(frame: any[], sizeCol: string, n: number, seed: SeedInput = 0): SampleResult {
+  return drawPPSWithRng(frame, sizeCol, n, createRng(seed, 'pps'));
+}
+
+export function drawPPSWithRng(frame: any[], sizeCol: string, n: number, rng: Rng): SampleResult {
   const N = frame.length;
   if (N === 0) throw new Error("PPS frame is empty.");
   if (n <= 0) return { sample: [], probabilities: [], weights: [], indices: [] };
@@ -265,7 +310,7 @@ export function drawPPS(frame: any[], sizeCol: string, n: number): SampleResult 
     cumPik[i] = acc;
   }
 
-  const u = Math.random(); // random start in [0, 1)
+  const u = rng.nextUnitInterval(); // random start in [0, 1)
   const selectedIndices: number[] = [];
 
   for (let i = 0; i < n; i++) {
@@ -300,7 +345,7 @@ export function drawPPS(frame: any[], sizeCol: string, n: number): SampleResult 
 /**
  * Draw Cluster Sample (Single Stage)
  */
-export function drawCluster(frame: any[], clusterCol: string, m: number): SampleResult {
+export function drawCluster(frame: any[], clusterCol: string, m: number, seed: SeedInput = 0): SampleResult {
   const clusters: Record<string, any[]> = {};
   frame.forEach((row, originalIndex) => {
     const val = String(row[clusterCol]);
@@ -316,8 +361,15 @@ export function drawCluster(frame: any[], clusterCol: string, m: number): Sample
     m = M;
   }
 
-  // SRS select m cluster keys
-  const drawnClusterRes = drawSRS(clusterKeys.map(k => ({ ID: k })), m, "srswor");
+  // SRS select m cluster keys. Sort the key list first so the selection does not
+  // depend on Object.keys() iteration order, which V8 reorders for integer-like keys.
+  clusterKeys.sort();
+  const drawnClusterRes = drawSRSWithRng(
+    clusterKeys.map(k => ({ ID: k })),
+    m,
+    "srswor",
+    deriveStream(seed, 'cluster-selection', clusterCol)
+  );
   const selectedClusterKeys = drawnClusterRes.sample.map(r => r.ID);
 
   const finalSample: any[] = [];
@@ -363,7 +415,12 @@ export interface StageConfig {
  * Draw a Multistage Hierarchical Sample (Recursive)
  * Handles option A (manual allocations) and option B (auto-distribution) with robust safeguards.
  */
-export function drawMultistage(frame: any[], config: StageConfig[], targetN: number | null): any[] {
+export function drawMultistage(
+  frame: any[],
+  config: StageConfig[],
+  targetN: number | null,
+  seed: SeedInput = 0
+): any[] {
   let currentSample = [...frame];
 
   for (let sIdx = 0; sIdx < config.length; sIdx++) {
@@ -386,7 +443,10 @@ export function drawMultistage(frame: any[], config: StageConfig[], targetN: num
       groups[key].push(row);
     });
 
-    const groupKeys = Object.keys(groups);
+    // Sort so the traversal does not depend on Object.keys() ordering. Each group
+    // draws from its own label-keyed substream anyway, so this only fixes the order
+    // in which rows are appended to the output.
+    const groupKeys = Object.keys(groups).sort();
     const numGroups = groupKeys.length;
 
     // OPTION B: Auto-distribute
@@ -408,7 +468,7 @@ export function drawMultistage(frame: any[], config: StageConfig[], targetN: num
         uniqueUnitsMap[val].push(row);
       });
 
-      const uniqueUnitsKeys = Object.keys(uniqueUnitsMap);
+      const uniqueUnitsKeys = Object.keys(uniqueUnitsMap).sort();
       const N_units = uniqueUnitsKeys.length;
 
       if (N_units === 0) continue;
@@ -425,14 +485,19 @@ export function drawMultistage(frame: any[], config: StageConfig[], targetN: num
       let drawRes: SampleResult;
       const tempUnitFrame = uniqueUnitsKeys.map(k => ({ ID: k }));
 
+      // One substream per (stage, parent group), keyed by the parent path rather than
+      // by loop position, so each group's selection is independent of the others and
+      // of the order groups are visited in.
+      const stageRng = deriveStream(seed, `stage${sIdx + 1}:${unitCol}`, groupKeys[g]);
+
       if (method === "PPS") {
         // Find cluster size (count of records inside each unique unit key)
         const unitSizes = uniqueUnitsKeys.map(k => uniqueUnitsMap[k].length);
         const tempPpsFrame = uniqueUnitsKeys.map((k, i) => ({ ID: k, size: unitSizes[i] }));
-        drawRes = drawPPS(tempPpsFrame, "size", nToSelect);
+        drawRes = drawPPSWithRng(tempPpsFrame, "size", nToSelect, stageRng);
       } else {
         const drawMeth = method === "Systematic Sampling" ? "systematic" : "srswor";
-        drawRes = drawSRS(tempUnitFrame, nToSelect, drawMeth);
+        drawRes = drawSRSWithRng(tempUnitFrame, nToSelect, drawMeth, stageRng);
       }
 
       // Map probabilities back to individual records

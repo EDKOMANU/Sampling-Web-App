@@ -69,7 +69,7 @@ graph TD
 * **Three Calibration Engines:**
   1. **Multiplicative Raking (Ratio/IPF):** Fits multi-marginal demographics iteratively while keeping weight multipliers positive.
   2. **Linear Calibration (GREG Solver):** Uses single-step Lagrange equations equivalent to Generalized Regression estimators.
-  3. **Logit Calibration:** Enforces strict boundary thresholds ($L \le w_i/d_i \le U$) to prevent excessive weight inflation.
+  3. **Truncated Raking (Bounded Ratio):** Raking with weight multipliers clipped into $L \le w_i/d_i \le U$ after each margin, to prevent excessive weight inflation. The bounds are always respected; where they bind, the calibration margins may not be met exactly and the residual discrepancy is reported. (Full Deville-Särndal logit calibration, which satisfies both simultaneously, is on the roadmap.)
 
 ### 5. Weighted Demographics & Representativeness Dashboard
 * **Dissimilarity Index (D):** Compares unweighted vs. weighted distributions against target census margins.
@@ -78,7 +78,7 @@ graph TD
 
 ### 6. Variance & Analytics Engine
 * **Stratified Taylor Series Linearization:** Computes design-based standard errors matching standard packages like R's `survey` or SAS's `PROC SURVEYMEANS`.
-* **Bootstrap Replicas Resampling:** McCarthy-Snowden or Rao-Wu cluster bootstrap weight generation (e.g., 100 replicates).
+* **Bootstrap Replicate Resampling:** Rao-Wu rescaled stratified cluster bootstrap (`m_h = n_h - 1`, rescaling factor `n_h/(n_h-1)`), e.g. 100 replicates. Jackknife and BRR-Fay are on the roadmap.
 * **Calibration Re-Estimation:** Re-calibrates every single replicate column during bootstrap iterations to capture calibration variance reductions perfectly.
 
 ---
