@@ -305,12 +305,19 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
 
 ## Deferred / noted, not scheduled
 
-- **Record the remaining lifecycle stages** (Frame load, Sample size, Allocation,
-  Fieldwork upload). T16 built the recorder and wired Draw / Non-response /
-  Calibration / Variance; the rest is one `recordStep()` call per handler.
+- ~~Record the remaining lifecycle stages~~ — DONE 2026-08-19. Frame (CSV, Excel
+  and demo paths), Fieldwork (CSV and Excel), Allocation and Sample size all
+  record now. All eight stages are covered.
+- **The methodology log needed a permanent entry point.** It was reachable only
+  through the diagnostics panel, which appears when something goes WRONG — so a
+  clean run, exactly when you want to export the report, had no way in. Found by
+  running the app, not by typechecking. Now a header button showing the step
+  count, always visible.
 
-- **Expose domain estimation in the variance tab.** T18 landed the estimator; the
-  UI still has no domain selector, so users cannot reach it. Small, high value.
+- ~~Expose domain estimation in the variance tab~~ — DONE 2026-08-19. Column +
+  value dropdowns in the variance panel, with copy explaining why filtering the
+  data instead gives the same mean and the wrong standard error. The chosen
+  domain is recorded on the Variance methodology step.
 
 - Cochran FPC inconsistency: `samplesize.ts:22` uses `n0/(1+(n0-1)/N)`,
   `App.tsx:410/450/463` uses `n0/(1+n0/N)`. Pick Cochran's. (Low impact.)

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import {
+  FileText,
   LayoutDashboard,
   GraduationCap,
   Calculator,
@@ -167,6 +168,9 @@ function App() {
   // Default 'adjust': the conservative rule. A lonely stratum otherwise contributes
   // zero variance, which understates the standard error silently.
   const [lonelyPsuPolicy, setLonelyPsuPolicy] = useState<LonelyPsuPolicy>('adjust');
+  // Subpopulation ("domain") estimation. Empty column = estimate over the whole sample.
+  const [domainCol, setDomainCol] = useState<string>('');
+  const [domainValue, setDomainValue] = useState<string>('');
   const [taylorResults, setTaylorResults] = useState<any>(null);
   const [bootstrapResults, setBootstrapResults] = useState<any>(null);
   const [bootstrapReps, setBootstrapReps] = useState<number>(100);
@@ -310,6 +314,12 @@ function App() {
         complete: (results: Papa.ParseResult<any>) => {
           if (results.data && results.data.length > 0) {
             setPopulationFrame(results.data);
+            recordStep('Frame', `Loaded population frame from ${file.name}`, {
+              'File': file.name,
+              'Format': 'CSV',
+              'Rows': results.data.length,
+              'Columns': results.data.length > 0 ? Object.keys(results.data[0] as object).length : 0,
+            });
             const cols = Object.keys(results.data[0] as object);
             setFrameColumns(cols);
             // Auto presets
@@ -331,6 +341,12 @@ function App() {
         const data = XLSX.utils.sheet_to_json(sheet);
         if (data && data.length > 0) {
           setPopulationFrame(data);
+          recordStep('Frame', `Loaded population frame from ${file.name}`, {
+            'File': file.name,
+            'Format': 'Excel',
+            'Rows': data.length,
+            'Columns': data.length > 0 ? Object.keys(data[0] as object).length : 0,
+          });
           const cols = Object.keys(data[0] as object);
           setFrameColumns(cols);
         }
@@ -354,6 +370,11 @@ function App() {
         complete: (results: Papa.ParseResult<any>) => {
           if (results.data && results.data.length > 0) {
             setSurveyData(results.data);
+            recordStep('Fieldwork', `Loaded fieldwork returns from ${file.name}`, {
+              'File': file.name,
+              'Format': 'CSV',
+              'Records': results.data.length,
+            });
             const cols = Object.keys(results.data[0] as object);
             setSurveyColumns(cols);
           }
@@ -372,6 +393,11 @@ function App() {
         const data = XLSX.utils.sheet_to_json(sheet);
         if (data && data.length > 0) {
           setSurveyData(data);
+          recordStep('Fieldwork', `Loaded fieldwork returns from ${file.name}`, {
+            'File': file.name,
+            'Format': 'Excel',
+            'Records': data.length,
+          });
           const cols = Object.keys(data[0] as object);
           setSurveyColumns(cols);
         }
@@ -470,6 +496,11 @@ function App() {
     }
 
     setPopulationFrame(demoData);
+    recordStep('Frame', 'Loaded the built-in demonstration frame', {
+      'Source': 'Generated demonstration data (not a real population)',
+      'Rows': demoData.length,
+      'Generator seed': DEMO_FRAME_SEED,
+    });
     setFrameFileName('Census_Demo_Frame_5000_Rows.csv');
     setFrameColumns(Object.keys(demoData[0]));
   };
@@ -817,6 +848,25 @@ function App() {
     }).sort((a, b) => b.size - a.size);
 
     setAllocatedStrataList(resultList);
+    recordStep('Allocation', `Allocated ${allocTargetN} units across ${resultList.length} strata by ${allocMethod} allocation`, {
+      'Method': allocMethod,
+      'Target sample size': allocTargetN,
+      'Strata': resultList.length,
+      'Stratification column': allocStrataCol || '(entered manually)',
+      'Variance column (Neyman)': allocMethod === 'neyman' ? (allocVarCol || '(none supplied)') : 'n/a',
+      'Allocated total': resultList.reduce((a, r) => a + r.allocated, 0),
+    });
+
+    recordStep('Sample size', `Baseline ${baselineN}, inflated to ${inflatedSampleSize} for design and non-response`, {
+      'Formula': sizeFormula,
+      'Confidence z': ssZ,
+      'Margin of error': ssE,
+      'Expected proportion p': ssP,
+      'Assumed design effect': ssDeff,
+      'Assumed response rate': ssRR,
+      'Baseline n0': baselineN,
+      'Inflated n': inflatedSampleSize,
+    });
     setIsAllocationStale(false);
   };
 
@@ -1211,7 +1261,8 @@ Seed: ${seedInfo.canonical}
       varianceClusterCol || undefined,
       varianceFpcCol || undefined,
       'mean',
-      lonelyPsuPolicy
+      lonelyPsuPolicy,
+      domainCol && domainValue ? { column: domainCol, value: domainValue } : undefined
     );
 
     setTaylorResults(res);
@@ -1229,6 +1280,7 @@ Seed: ${seedInfo.canonical}
       'Cluster column': varianceClusterCol || '(none)',
       'FPC column': varianceFpcCol || '(no correction applied)',
       'Single-PSU rule': lonelyPsuPolicy,
+      'Domain': domainCol && domainValue ? `${domainCol} = ${domainValue}` : '(whole sample)',
     });
 
     // Surface methodological problems rather than quietly returning a plausible number.
@@ -1573,6 +1625,25 @@ Seed: ${seedInfo.canonical}
 
         {/* Global Stats Ribbon */}
         <div className="hidden lg:flex items-center gap-6">
+          {/* Persistent entry point to the methodology record. It must NOT live only
+              inside the diagnostics panel: that panel appears when something goes wrong,
+              so a clean run — precisely when you want to export the report — would have
+              no way to reach it. */}
+          <button
+            onClick={() => setShowLog(true)}
+            title="Open the methodology record and export the report"
+            className="flex items-center gap-2 border-r border-white/10 pr-6 hover:opacity-80 transition-opacity"
+          >
+            <FileText className="h-4 w-4 text-emerald-400" />
+            <div className="text-left">
+              <p className="text-[10px] text-gray-400 font-mono leading-none m-0">METHODOLOGY</p>
+              <p className="text-sm font-semibold text-gray-200 leading-none mt-1 m-0">
+                {methodologyEvents.length > 0
+                  ? `${methodologyEvents.length} step${methodologyEvents.length === 1 ? '' : 's'}`
+                  : "Not started"}
+              </p>
+            </div>
+          </button>
           <div className="flex items-center gap-2 border-r border-white/10 pr-6">
             <Database className="h-4 w-4 text-indigo-400" />
             <div className="text-left">
@@ -4183,6 +4254,42 @@ Seed: ${seedInfo.canonical}
                         <option key={c} value={c}>{c === 'fpc' ? 'fpc (from this draw)' : c}</option>
                       ))}
                     </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-400 mb-1">
+                      Subpopulation (Domain)
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <select
+                        value={domainCol}
+                        onChange={(e) => { setDomainCol(e.target.value); setDomainValue(''); }}
+                        className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                      >
+                        <option value="">-- Whole sample --</option>
+                        {weightedSample.length > 0 && Object.keys(weightedSample[0])
+                          .filter(c => c !== 'weight' && c !== 'prob' && c !== 'fpc'
+                            && c !== 'base_weight' && c !== 'design_weight' && c !== 'adjusted_weight')
+                          .map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                      <select
+                        value={domainValue}
+                        onChange={(e) => setDomainValue(e.target.value)}
+                        disabled={!domainCol}
+                        className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 disabled:opacity-40"
+                      >
+                        <option value="">-- Select value --</option>
+                        {domainCol && Array.from(
+                          new Set(weightedSample.map(r => String(r[domainCol])))
+                        ).sort().slice(0, 200).map(v => <option key={v} value={v}>{v}</option>)}
+                      </select>
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-1 leading-relaxed">
+                      Estimates for a subgroup keep the whole sample in the calculation.
+                      Filtering the data down to the subgroup and re-running gives the same
+                      mean but the wrong standard error, because the number of subgroup
+                      members falling in each sampling unit is itself random.
+                    </p>
                   </div>
 
                   <div>
