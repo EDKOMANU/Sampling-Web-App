@@ -48,6 +48,7 @@ import type { StageConfig } from './utils/sampling';
 import { calculateWeightSummary, adjustWeightingClass, adjustResponsePropensity, calibrateWeights } from './utils/weighting';
 import type { RakingMargin, CalibrationWarning } from './utils/weighting';
 import { estimateTaylor, generateBootstrapWeights, estimateBootstrap } from './utils/variance';
+import type { LonelyPsuPolicy } from './utils/variance';
 
 import MethodologyHub from './MethodologyHub';
 
@@ -158,6 +159,9 @@ function App() {
   const [varianceStrataCol, setVarianceStrataCol] = useState<string>('');
   const [varianceClusterCol, setVarianceClusterCol] = useState<string>('');
   const [varianceFpcCol, setVarianceFpcCol] = useState<string>('');
+  // Default 'adjust': the conservative rule. A lonely stratum otherwise contributes
+  // zero variance, which understates the standard error silently.
+  const [lonelyPsuPolicy, setLonelyPsuPolicy] = useState<LonelyPsuPolicy>('adjust');
   const [taylorResults, setTaylorResults] = useState<any>(null);
   const [bootstrapResults, setBootstrapResults] = useState<any>(null);
   const [bootstrapReps, setBootstrapReps] = useState<number>(100);
@@ -1100,7 +1104,9 @@ Seed: ${seedInfo.canonical}
       'weight', 
       varianceStrataCol || undefined, 
       varianceClusterCol || undefined,
-      varianceFpcCol || undefined
+      varianceFpcCol || undefined,
+      'mean',
+      lonelyPsuPolicy
     );
 
     setTaylorResults(res);
@@ -3912,6 +3918,29 @@ Seed: ${seedInfo.canonical}
                         <option key={c} value={c}>{c === 'fpc' ? 'fpc (from this draw)' : c}</option>
                       ))}
                     </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-400 mb-1">
+                      Single-PSU Strata Rule
+                    </label>
+                    <select
+                      value={lonelyPsuPolicy}
+                      onChange={(e) => setLonelyPsuPolicy(e.target.value as LonelyPsuPolicy)}
+                      className="w-full bg-gray-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="adjust">Adjust — centre on the overall mean (conservative)</option>
+                      <option value="average">Average — impute from strata with 2+ units</option>
+                      <option value="certainty">Certainty — contribute zero (take-all designs)</option>
+                      <option value="remove">Remove — contribute zero (understates the SE)</option>
+                      <option value="fail">Fail — refuse to produce a standard error</option>
+                    </select>
+                    <p className="text-[10px] text-gray-400 mt-1 leading-relaxed">
+                      A stratum holding one sampling unit yields no variance of its own.
+                      <span className="font-semibold text-gray-300"> Adjust</span> is the default
+                      because it can only make the standard error too large; treating such a
+                      stratum as zero makes it too small, and does so silently.
+                    </p>
                   </div>
 
                   <button

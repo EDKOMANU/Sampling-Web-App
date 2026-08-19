@@ -110,11 +110,29 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
     applying the FPC reduces the SE (2.5569 -> 2.3834), and that a mismatched
     strata declaration refuses the correction and keeps the SE conservative.
 
-- [ ] **T9. Lonely-PSU handling as an explicit option**
+- [x] **T9. Lonely-PSU handling as an explicit option** — DONE 2026-08-19
   - Files: `src/utils/variance.ts`, `src/App.tsx`
-  - Problem: single-PSU strata silently contribute zero variance -> SEs too small.
-  - Fix: `remove | adjust | average | certainty | fail`, default `adjust`; always
-    report how many strata were affected.
+  - `LonelyPsuPolicy = adjust | average | certainty | remove | fail`, default
+    **adjust** (conservative: it can only push the SE up). Selectable in the UI.
+  - `adjust` centres the lonely PSU on the GRAND mean over all PSUs in all strata,
+    and drops the `n_h/(n_h-1)` factor — that term is 1/0 at n_h=1 and would
+    return Infinity. Scale is the FPC alone, matching R's `onestrat`.
+  - **Certainty gate** runs first: a take-all stratum (`fpc = 1`, or `prob = 1`
+    which is the only signal under PPS) contributes zero BY DESIGN and is reported
+    as `CERTAINTY_STRATUM`, not adjusted.
+  - **Misconfiguration guard**: if >50% of strata are singletons the strata column
+    is describing an identifier, not a design. `adjust` there would synthesise a
+    plausible number numerically close to the SRS SE and hide the mistake, so it is
+    refused (`STRATA_COLUMN_LOOKS_WRONG`) and the obvious zero is kept.
+  - `NO_ESTIMABLE_VARIANCE` when the sample resolves to a single PSU overall.
+  - Warnings name the affected strata AND their share of total weight, so the user
+    can judge materiality rather than just seeing a count.
+  - Accept: VERIFIED. On a frame with one atypical lonely stratum,
+    remove SE=0.9014 vs adjust SE=14.7151 — a 16x understatement under the old
+    silent default. Tests cover all five policies, the certainty gate, the
+    misconfiguration guard, and the single-PSU case.
+  - Known gap: `generateBootstrapWeights` still has its own silent `n_h <= 1`
+    branch, so the two engines can disagree. Folded into T21.
 
 - [ ] **T10. Design degrees of freedom and t-based intervals**
   - Files: `src/utils/variance.ts`, `src/App.tsx`
@@ -166,6 +184,9 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
 - [ ] **T19. Real Deville-Sarndal logit calibration + trim-then-rerake outer loop**
 - [ ] **T20. IRLS for the propensity model + propensity-quintile adjustment cells**
 - [ ] **T21. Jackknife and BRR-Fay replicate weights**
+  - Also: make `generateBootstrapWeights` honour the same LonelyPsuPolicy as the
+    Taylor engine; today it silently gives a singleton stratum zero bootstrap
+    variance and `estimateBootstrap` hardcodes `warnings: []`.
 - [ ] **T22. Design-based quantiles (Woodruff) and ratio estimation**
 - [ ] **T23. Move the bootstrap off the main thread with typed-array replicate storage**
   - Given the Electron-first decision, prefer Node `worker_threads` or an Electron

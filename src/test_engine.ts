@@ -270,6 +270,71 @@ assert(misdeclared.se >= noFpc.se * 0.99,
   "When the FPC is refused the SE must stay conservative, not shrink");
 console.log("  * Mismatched strata: correction correctly refused, SE stayed conservative");
 
+// --- LONELY PSU HANDLING (T9) ---
+// A stratum with one PSU yields a deviation of exactly zero from its own mean, so it
+// contributes no variance. Treating that as "no variance" is anticonservative.
+const lonelyFrame = [
+  { id: 1, stratum: "A", v: 10, weight: 5, fpc: 0 },
+  { id: 2, stratum: "A", v: 14, weight: 5, fpc: 0 },
+  { id: 3, stratum: "A", v: 11, weight: 5, fpc: 0 },
+  { id: 4, stratum: "B", v: 90, weight: 5, fpc: 0 }, // the lonely one, and atypical
+];
+
+const lonelyRemove = estimateTaylor(lonelyFrame, "v", "weight", "stratum", undefined, undefined, "mean", "remove");
+const lonelyAdjust = estimateTaylor(lonelyFrame, "v", "weight", "stratum", undefined, undefined, "mean", "adjust");
+const lonelyAverage = estimateTaylor(lonelyFrame, "v", "weight", "stratum", undefined, undefined, "mean", "average");
+const lonelyFail = estimateTaylor(lonelyFrame, "v", "weight", "stratum", undefined, undefined, "mean", "fail");
+
+console.log(`- Lonely PSU: remove SE=${lonelyRemove.se.toFixed(4)}, adjust SE=${lonelyAdjust.se.toFixed(4)}, average SE=${lonelyAverage.se.toFixed(4)}`);
+assert(lonelyAdjust.se > lonelyRemove.se,
+  "adjust must give a LARGER standard error than remove (it is the conservative rule)");
+assert(lonelyAverage.se > lonelyRemove.se,
+  "average must give a larger standard error than remove");
+assert(Number.isNaN(lonelyFail.se), "fail must refuse to produce a standard error");
+assert(lonelyRemove.warnings.some(w => w.code === "LONELY_PSU_REMOVED"),
+  "remove must warn that the standard error is too small");
+assert(lonelyAdjust.warnings.some(w => w.code === "LONELY_PSU_ADJUSTED"),
+  "adjust must report that it fired");
+assert(lonelyFail.warnings.some(w => w.code === "LONELY_PSU_FAIL"), "fail must explain itself");
+assert(Number.isFinite(lonelyAdjust.se), "adjust must never produce Infinity via n_h/(n_h-1)");
+
+// The default must be the conservative rule, not the silent zero it used to be.
+const lonelyDefault = estimateTaylor(lonelyFrame, "v", "weight", "stratum");
+assert(Math.abs(lonelyDefault.se - lonelyAdjust.se) < 1e-9, "the default policy must be 'adjust'");
+
+// A genuine take-all stratum (fpc = 1) contributes zero BY DESIGN -- not a defect.
+const certaintyFrame = [
+  { id: 1, stratum: "A", v: 10, weight: 5, fpc: 0 },
+  { id: 2, stratum: "A", v: 14, weight: 5, fpc: 0 },
+  { id: 3, stratum: "C", v: 90, weight: 1, fpc: 1 }, // fully enumerated
+];
+const certaintyRes = estimateTaylor(certaintyFrame, "v", "weight", "stratum", undefined, "fpc");
+assert(certaintyRes.warnings.some(w => w.code === "CERTAINTY_STRATUM"),
+  "a take-all stratum must be recognised as certainty, not adjusted");
+assert(!certaintyRes.warnings.some(w => w.code === "LONELY_PSU_ADJUSTED"),
+  "a certainty stratum must NOT be treated as a lonely PSU");
+console.log("  * Certainty stratum (fpc=1) correctly distinguished from a lonely PSU");
+
+// GUARD: a high-cardinality column picked by mistake makes nearly every stratum a
+// singleton. Under 'adjust' that yields a plausible number close to the SRS SE, which
+// hides the misconfiguration. It must be refused, not dressed up.
+const badStrataFrame = Array.from({ length: 20 }, (_, i) => ({
+  id: i, rowId: `UNIQUE-${i}`, v: 10 + i, weight: 5, fpc: 0
+}));
+const badStrata = estimateTaylor(badStrataFrame, "v", "weight", "rowId");
+assert(badStrata.warnings.some(w => w.code === "STRATA_COLUMN_LOOKS_WRONG"),
+  "an all-singleton strata column must be flagged as a misconfiguration");
+assert(badStrata.se === 0,
+  "a misconfigured strata column must keep the obvious zero, not synthesise a plausible SE");
+console.log("  * All-singleton strata column flagged; no plausible-looking SE synthesised");
+
+// GUARD: a configuration with a single PSU overall has no estimable variance at all.
+const singlePsu = estimateTaylor(
+  [{ id: 1, stratum: "A", v: 10, weight: 5 }], "v", "weight", "stratum");
+assert(singlePsu.warnings.some(w => w.code === "NO_ESTIMABLE_VARIANCE"),
+  "a single-PSU sample must say no variance is estimable rather than reporting SE = 0");
+console.log("  * Single-PSU configuration reports NO_ESTIMABLE_VARIANCE");
+
 // Rao-Wu Stratified Cluster Bootstrap Replicate Weight Generation
 const bootWeights = generateBootstrapWeights(raked.sample, 50, "weight", "stratum", undefined, "TEST-SEED-BOOT");
 console.log(`- Rao-Wu Stratified Bootstrap: Generated ${bootWeights.replicateWeights[0].length} replicate weights for all ${bootWeights.replicateWeights.length} rows`);
