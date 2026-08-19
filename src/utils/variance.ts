@@ -64,10 +64,28 @@ export function estimateTaylor(
   clusterCol?: string,
   fpcCol?: string,
   type: "mean" | "total" = "mean",
-  lonelyPsuPolicy: LonelyPsuPolicy = 'adjust'
+  lonelyPsuPolicy: LonelyPsuPolicy = 'adjust',
+  /**
+   * Restrict the estimate to a subpopulation ("domain"), e.g. women aged 18-34.
+   *
+   * The whole sample must still be passed in. Domain estimation works by zeroing the
+   * linearised variable outside the domain, NOT by filtering the rows: the number of
+   * domain members falling into each PSU is itself a random outcome of the design, and
+   * an estimator that conditions on it treats a random quantity as fixed and reports a
+   * variance that is too small. Filtering first is the single most common error in
+   * applied survey analysis, and it is silent -- the estimate looks fine.
+   */
+  domain?: { column: string; value: string }
 ): EstimationResult {
   const warnings: VarianceWarning[] = [];
   const n = sample.length;
+
+  // Domain membership indicator, evaluated once. Rows outside the domain stay in the
+  // sample so they continue to define the stratum and PSU structure.
+  const inDomain: boolean[] = domain
+    ? sample.map(row => String(row[domain.column]) === domain.value)
+    : sample.map(() => true);
+  const domainN = inDomain.reduce((acc, d) => acc + (d ? 1 : 0), 0);
   if (n === 0) {
     return { estimate: 0, se: 0, cv: 0, ciLower: 0, ciUpper: 0, deff: 1.0, df: 0, criticalValue: NaN, warnings };
   }
@@ -76,7 +94,8 @@ export function estimateTaylor(
   let weightedSumY = 0;
   let sumW = 0;
   
-  sample.forEach(row => {
+  sample.forEach((row, i) => {
+    if (!inDomain[i]) return;
     const y = Number(row[targetCol]) || 0;
     const w = Number(row[weightCol]) || 1.0;
     weightedSumY += w * y;
@@ -84,6 +103,27 @@ export function estimateTaylor(
   });
 
   const estimate = type === "mean" ? (sumW > 0 ? weightedSumY / sumW : 0) : weightedSumY;
+
+  if (domain) {
+    if (domainN === 0) {
+      warnings.push({
+        severity: 'error',
+        code: 'DOMAIN_EMPTY',
+        message: `No sampled units fall in the domain ${domain.column} = "${domain.value}". `
+          + 'Check the value spelling and that this variable is present on the weighted sample.'
+      });
+      return { estimate: 0, se: 0, cv: 0, ciLower: 0, ciUpper: 0, deff: 1.0, df: 0, criticalValue: NaN, warnings };
+    }
+    if (domainN < 30) {
+      warnings.push({
+        severity: 'warning',
+        code: 'DOMAIN_SMALL',
+        message: `Only ${domainN} sampled unit${domainN === 1 ? '' : 's'} fall in the domain `
+          + `${domain.column} = "${domain.value}". Domain estimates on this few cases are `
+          + 'fragile, and many statistical offices suppress publication below 30 to 50 units.'
+      });
+    }
+  }
 
   // 2. Stratify, Cluster, and calculate linearized variables (z_i)
   // If strataCol is not provided, treat entire sample as a single stratum
@@ -102,9 +142,13 @@ export function estimateTaylor(
     // Linearized variable z_hij
     // For Mean: z_hij = (w_hij / sumW) * (y_hij - estimate)
     // For Total: z_hij = w_hij * y_hij
-    const z = type === "mean"
-      ? (sumW > 0 ? (w / sumW) * (y - estimate) : 0)
-      : w * y;
+    // Outside the domain the contribution is exactly zero, but the row still belongs to
+    // its stratum and PSU. That is what makes the random domain size enter the variance.
+    const z = !inDomain[rowIndex]
+      ? 0
+      : type === "mean"
+        ? (sumW > 0 ? (w / sumW) * (y - estimate) : 0)
+        : w * y;
 
     if (!strataGroups[s]) {
       strataGroups[s] = { psuMap: {} };
@@ -448,7 +492,8 @@ export function estimateTaylor(
   if (type === "mean") {
     let meanY = 0;
     let sumW_srs = 0;
-    sample.forEach(row => {
+    sample.forEach((row, i) => {
+      if (!inDomain[i]) return;
       const y = Number(row[targetCol]) || 0;
       const w = Number(row[weightCol]) || 1.0;
       meanY += w * y;
@@ -458,19 +503,21 @@ export function estimateTaylor(
 
     let varY = 0;
     let sumW_minus_1 = 0;
-    sample.forEach(row => {
+    sample.forEach((row, i) => {
+      if (!inDomain[i]) return;
       const y = Number(row[targetCol]) || 0;
       const w = Number(row[weightCol]) || 1.0;
       varY += w * Math.pow(y - meanY, 2);
       sumW_minus_1 += w;
     });
     const s2Y = sumW_minus_1 > 1 ? varY / (sumW_minus_1 - 1) : 0;
-    vSrs = s2Y / n;
+    vSrs = s2Y / domainN;
   } else {
     // For Total: V_srs(Total) = N^2 * s_y^2 / n
     let meanY = 0;
     let sumW_srs = 0;
-    sample.forEach(row => {
+    sample.forEach((row, i) => {
+      if (!inDomain[i]) return;
       const y = Number(row[targetCol]) || 0;
       const w = Number(row[weightCol]) || 1.0;
       meanY += w * y;
@@ -479,13 +526,14 @@ export function estimateTaylor(
     meanY = sumW_srs > 0 ? meanY / sumW_srs : 0;
 
     let varY = 0;
-    sample.forEach(row => {
+    sample.forEach((row, i) => {
+      if (!inDomain[i]) return;
       const y = Number(row[targetCol]) || 0;
       const w = Number(row[weightCol]) || 1.0;
       varY += w * Math.pow(y - meanY, 2);
     });
     const s2Y = sumW_srs > 1 ? varY / (sumW_srs - 1) : 0;
-    vSrs = Math.pow(sumW_srs, 2) * (s2Y / n);
+    vSrs = Math.pow(sumW_srs, 2) * (s2Y / domainN);
   }
 
   const deff = vSrs > 0 ? totalVariance / vSrs : 1.0;

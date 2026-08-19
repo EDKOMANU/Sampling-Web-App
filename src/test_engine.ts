@@ -448,6 +448,54 @@ console.log(`- Rao-Wu Stratified Bootstrap: Generated ${bootWeights.replicateWei
 assert(bootWeights.replicateWeights.length === raked.sample.length, "Bootstrap weight mapping row count error");
 assert(bootWeights.replicateWeights[0].length === 50, "Bootstrap replicate column size error");
 
+// --- DOMAIN (SUBPOPULATION) ESTIMATION (T18) ---
+// The correct estimator keeps the whole sample and zeroes the linearised variable
+// outside the domain. Filtering the rows first conditions on the domain size, which is
+// itself random, and reports a variance that is too small.
+const domFrame = Array.from({ length: 120 }, (_, i) => ({
+  id: i,
+  // 5 strata and a 1-in-3 domain: coprime, so domain members land unevenly across
+  // strata. If the domain were a union of whole strata, filtering WOULD be equivalent
+  // and the test would prove nothing.
+  stratum: `S${i % 5}`,
+  sex: i % 3 === 0 ? "F" : "M",
+  v: 20 + (i % 11) * 4,
+  weight: 25,
+}));
+
+const domainRes = estimateTaylor(
+  domFrame, "v", "weight", "stratum", undefined, undefined, "mean", "adjust",
+  { column: "sex", value: "F" });
+
+// The naive approach: filter, then estimate. Same point estimate, smaller SE.
+const filtered = domFrame.filter(r => r.sex === "F");
+const naiveRes = estimateTaylor(filtered, "v", "weight", "stratum");
+
+assert(Math.abs(domainRes.estimate - naiveRes.estimate) < 1e-9,
+  "domain and filtered estimates must agree on the point estimate");
+assert(domainRes.se !== naiveRes.se,
+  "domain and filtered variance must differ - if they agree the indicator is not working");
+console.log(`- Domain estimation: mean=${domainRes.estimate.toFixed(3)}, SE=${domainRes.se.toFixed(4)} vs naive-filter SE=${naiveRes.se.toFixed(4)}`);
+console.log(`  * df ${domainRes.df} (whole design) vs ${naiveRes.df} (filtered) - filtering discards degrees of freedom too`);
+assert(domainRes.df >= naiveRes.df,
+  "the domain estimator must retain the full design degrees of freedom");
+
+// A domain nobody falls into must say so, not report a confident zero.
+const emptyDom = estimateTaylor(
+  domFrame, "v", "weight", "stratum", undefined, undefined, "mean", "adjust",
+  { column: "sex", value: "X" });
+assert(emptyDom.warnings.some(w => w.code === "DOMAIN_EMPTY"),
+  "an empty domain must be reported, not returned as an estimate");
+
+// Thin domains are flagged.
+const thinDom = estimateTaylor(
+  domFrame.map((r, i) => ({ ...r, rare: i < 12 ? "yes" : "no" })),
+  "v", "weight", "stratum", undefined, undefined, "mean", "adjust",
+  { column: "rare", value: "yes" });
+assert(thinDom.warnings.some(w => w.code === "DOMAIN_SMALL"),
+  "a domain below the publication threshold must be flagged");
+console.log("  * Empty and thin domains both reported");
+
 // --- DIAGNOSTICS CHANNEL (T12) ---
 console.log("\n[5/5] Testing Diagnostics Channel...");
 

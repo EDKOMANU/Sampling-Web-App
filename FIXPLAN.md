@@ -231,7 +231,24 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
 
 ## Phase 4 — Close the methodology gaps
 
-- [ ] **T18. Domain (subpopulation) estimation** — biggest functional gap
+- [x] **T18. Domain (subpopulation) estimation** — DONE 2026-08-19
+  - `estimateTaylor` takes an optional `domain: { column, value }`. The WHOLE
+    sample is still passed in; the linearised variable is zeroed outside the
+    domain rather than the rows being filtered out.
+  - Why it matters: the number of domain members landing in each PSU is itself a
+    random outcome of the design. Filtering first conditions on it, treating a
+    random quantity as fixed. It is the most common error in applied survey
+    analysis and it is silent — the point estimate is identical.
+  - `DOMAIN_EMPTY` (error) and `DOMAIN_SMALL` (warning, below 30 units).
+  - Deff now uses the domain sample size as its SRS reference, not the full n.
+  - Accept: VERIFIED. On a frame with 5 strata and a coprime 1-in-3 domain, the
+    two approaches agree on the mean (39.500) but differ on SE (2.0295 vs 2.1149)
+    and sharply on degrees of freedom: **115 for the design vs 35 filtered**.
+  - Note: a domain that happens to be a union of whole strata IS equivalent under
+    filtering; the first test frame was accidentally of that form and correctly
+    showed no difference.
+  - Not yet wired into the UI — the engine takes it, the variance tab does not
+    expose it. Follow-up logged below.
 - [ ] **T19. Real Deville-Sarndal logit calibration + trim-then-rerake outer loop**
 - [ ] **T20. IRLS for the propensity model + propensity-quintile adjustment cells**
 - [ ] **T21. Jackknife and BRR-Fay replicate weights**
@@ -264,6 +281,9 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
 ---
 
 ## Deferred / noted, not scheduled
+
+- **Expose domain estimation in the variance tab.** T18 landed the estimator; the
+  UI still has no domain selector, so users cannot reach it. Small, high value.
 
 - Cochran FPC inconsistency: `samplesize.ts:22` uses `n0/(1+(n0-1)/N)`,
   `App.tsx:410/450/463` uses `n0/(1+n0/N)`. Pick Cochran's. (Low impact.)
