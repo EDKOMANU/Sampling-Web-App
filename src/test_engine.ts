@@ -5,7 +5,7 @@
 
 import { calcCochran, calcSlovin, calcComplexSurvey, allocateStrata } from './utils/samplesize';
 import { drawSRS, drawStratified } from './utils/sampling';
-import { adjustWeightingClass, rakeWeights, preflightCalibration } from './utils/weighting';
+import { adjustWeightingClass, rakeWeights, preflightCalibration, adjustResponsePropensity } from './utils/weighting';
 import { estimateTaylor, generateBootstrapWeights } from './utils/variance';
 import { createRng } from './utils/random';
 import { hasBlockingError, dedupeByCode, bySeverity } from './utils/diagnostics';
@@ -495,6 +495,60 @@ const thinDom = estimateTaylor(
 assert(thinDom.warnings.some(w => w.code === "DOMAIN_SMALL"),
   "a domain below the publication threshold must be flagged");
 console.log("  * Empty and thin domains both reported");
+
+// --- RESPONSE PROPENSITY MODEL (T20) ---
+// Response depends strongly on the covariate: 90% of the young group respond, 30% of
+// the old group. A solver that has actually converged must recover that separation.
+// The previous gradient-descent solver left the coefficients near zero, so every unit
+// was fitted at roughly the overall response rate and the "adjustment" adjusted nothing.
+const propFrame = Array.from({ length: 600 }, (_, i) => {
+  const young = i < 300;
+  const k = i % 10;
+  return {
+    id: i,
+    weight: 10,
+    ageGroup: young ? "young" : "old",
+    responded: young ? (k < 9 ? 1 : 0) : (k < 3 ? 1 : 0),
+  };
+});
+
+const propRes = adjustResponsePropensity(propFrame, "responded", [], ["ageGroup"], "weight", 10.0);
+const youngP = propRes.fullSample.find(r => r.ageGroup === "young").propensity_score;
+const oldP = propRes.fullSample.find(r => r.ageGroup === "old").propensity_score;
+const overallRate = propFrame.filter(r => r.responded === 1).length / propFrame.length;
+
+console.log(`- Propensity model: young p=${youngP.toFixed(3)} (true 0.900), old p=${oldP.toFixed(3)} (true 0.300)`);
+console.log(`  * overall response rate ${overallRate.toFixed(3)} — the value an unconverged solver returns for both`);
+assert(Math.abs(youngP - 0.9) < 0.02, `IRLS must recover p=0.9 for the young group, got ${youngP.toFixed(4)}`);
+assert(Math.abs(oldP - 0.3) < 0.02, `IRLS must recover p=0.3 for the old group, got ${oldP.toFixed(4)}`);
+assert(Math.abs(youngP - oldP) > 0.5,
+  "the fitted propensities must separate; collapsing to the overall rate means the solver never converged");
+
+// The adjustment must actually differ between groups: 1/0.3 is over three times 1/0.9.
+const youngF = propRes.fullSample.find(r => r.ageGroup === "young" && r.responded === 1).adjustment_factor;
+const oldF = propRes.fullSample.find(r => r.ageGroup === "old" && r.responded === 1).adjustment_factor;
+assert(oldF / youngF > 2.5, `low-response group must carry a much larger factor, ratio was ${(oldF / youngF).toFixed(2)}`);
+console.log(`  * adjustment factors ${youngF.toFixed(2)} vs ${oldF.toFixed(2)} (ratio ${(oldF / youngF).toFixed(2)})`);
+
+// Weighted respondents must reproduce the eligible population total.
+const propSum = propRes.respondents.reduce((a, r) => a + r.weight, 0);
+assert(Math.abs(propSum - 6000) < 60, `adjusted respondent weights must recover the 6,000 eligible total, got ${propSum.toFixed(0)}`);
+
+assert(propRes.warnings.some(w => w.code === "PROPENSITY_FIT"),
+  "the model fit must be reported through the diagnostics channel");
+assert(!propRes.warnings.some(w => w.code === "PROPENSITY_NOT_CONVERGED"),
+  "a well-conditioned model must converge");
+
+// Complete separation has no maximum likelihood estimate and must be reported.
+const sepFrame = Array.from({ length: 200 }, (_, i) => ({
+  id: i, weight: 10,
+  flag: i < 100 ? "A" : "B",
+  responded: i < 100 ? 1 : 0,          // flag predicts response perfectly
+}));
+const sepRes = adjustResponsePropensity(sepFrame, "responded", [], ["flag"], "weight", 5.0);
+assert(sepRes.warnings.some(w => w.code === "PROPENSITY_SEPARATION" || w.code === "PROPENSITY_EXTREME"),
+  "perfect prediction must be reported, not silently turned into enormous weights");
+console.log("  * Complete separation detected and reported");
 
 // --- DIAGNOSTICS CHANNEL (T12) ---
 console.log("\n[5/5] Testing Diagnostics Channel...");

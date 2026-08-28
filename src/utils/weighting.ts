@@ -7,7 +7,7 @@ import type { Diagnostic } from './diagnostics';
  * Implements:
  * 1. Base weight calculation and weight summaries.
  * 2. Weighting class non-response adjustments.
- * 3. Response propensity scoring via a compact gradient descent logistic regression solver.
+ * 3. Response propensity scoring via an IRLS (Newton-Raphson) logistic regression solver.
  * 4. Iterative Proportional Fitting (Raking) with dynamic category alignment and weight trimming.
  */
 
@@ -208,83 +208,141 @@ export function adjustWeightingClass(
 class LogisticRegressionSolver {
   private beta: number[] = [];
   private numFeatures = 0;
+  /** Whether the Newton iteration reached the tolerance. */
+  public converged = false;
+  /** Newton steps actually taken. */
+  public iterations = 0;
+  /** Set when a covariate perfectly predicts response, so the MLE does not exist. */
+  public separationDetected = false;
+  /** Residual deviance at the final step, for reporting fit quality. */
+  public finalDeviance = NaN;
 
   private sigmoid(z: number): number {
     return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, z)))); // Cap z to prevent under/overflow
   }
 
   /**
-   * Fit logistic regression model
-   * @param X 2D matrix of features (rows = samples, cols = features)
-   * @param y Binary target array (0 or 1)
-   * @param weights Optional weights for weighted logistic regression
-   * @param maxIterations Maximum iterations for gradient descent
-   * @param learningRate Base learning rate
+   * Fit a weighted logistic regression by Iteratively Reweighted Least Squares.
+   *
+   * IRLS is Newton-Raphson on the log-likelihood, and for a generalised linear model
+   * it converges quadratically -- typically in five to eight iterations. The previous
+   * implementation used plain gradient descent with a learning rate decaying as
+   * 0.05/(1 + 0.01*iter) over averaged gradients, which after 500 iterations had barely
+   * moved the coefficients off zero. Fitted propensities therefore clustered around the
+   * overall response rate, every unit received almost the same adjustment factor, and
+   * the module produced a non-response correction that did not correct for
+   * non-response. That failure was invisible: the weights looked reasonable.
+   *
+   * Each step solves the weighted least squares problem
+   *     (X' W X + ridge I) beta = X' W z
+   * with working weights W_i = w_i * mu_i (1 - mu_i) and working response
+   *     z_i = eta_i + (y_i - mu_i) / (mu_i (1 - mu_i)).
+   *
+   * The ridge term is small but not optional: response-propensity models routinely
+   * contain a covariate that perfectly predicts response for some cell (complete
+   * separation), which sends the coefficient to infinity and X'WX to singular.
+   * Separation is detected and reported rather than silently producing enormous weights.
+   *
+   * @param X Feature matrix, first column the intercept
+   * @param y Binary response indicator
+   * @param weights Optional survey weights for a design-weighted fit
+   * @param maxIterations Newton steps before giving up
+   * @param tolerance Convergence threshold on the largest coefficient change
    */
   public fit(
     X: number[][],
     y: number[],
     weights?: number[],
-    maxIterations = 500,
-    learningRate = 0.05
+    maxIterations = 30,
+    tolerance = 1e-9
   ): void {
     const N = X.length;
     if (N === 0) return;
-    this.numFeatures = X[0].length;
-    
-    // Initialize weights to 0
-    this.beta = Array(this.numFeatures).fill(0);
+    const P = X[0].length;
+    this.numFeatures = P;
+    this.beta = Array(P).fill(0);
+    this.converged = false;
+    this.iterations = 0;
+    this.separationDetected = false;
+
     const obsWeights = weights || Array(N).fill(1.0);
-
-    // Normalize weights to sum to N
     const wSum = obsWeights.reduce((a, b) => a + b, 0);
-    const normalizedWeights = wSum > 0 ? obsWeights.map(w => (w * N) / wSum) : obsWeights;
+    const w = wSum > 0 ? obsWeights.map(v => (v * N) / wSum) : obsWeights;
 
-    // Gradient descent with Armijo-style line search or standard backoff
+    // Ridge scaled to the data, so it stabilises without meaningfully biasing the fit.
+    const ridge = 1e-8 * N;
+
+    let prevDeviance = Infinity;
+
     for (let iter = 0; iter < maxIterations; iter++) {
-      const gradients = Array(this.numFeatures).fill(0);
-      let loss = 0;
+      this.iterations = iter + 1;
+
+      const A: number[][] = Array.from({ length: P }, () => Array(P).fill(0));
+      const b: number[] = Array(P).fill(0);
+      let deviance = 0;
+      let extremeFitted = 0;
 
       for (let i = 0; i < N; i++) {
         const xi = X[i];
-        const yi = y[i];
-        const wi = normalizedWeights[i];
+        let eta = 0;
+        for (let j = 0; j < P; j++) eta += this.beta[j] * xi[j];
 
-        // Dot product
-        let dot = 0;
-        for (let j = 0; j < this.numFeatures; j++) {
-          dot += this.beta[j] * xi[j];
+        const mu = this.sigmoid(eta);
+        // Clamp away from the boundary: the working weight mu(1-mu) vanishes there and
+        // the working response divides by it.
+        const muC = Math.min(Math.max(mu, 1e-10), 1 - 1e-10);
+        if (mu < 1e-6 || mu > 1 - 1e-6) extremeFitted++;
+
+        const variance = muC * (1 - muC);
+        const wi = w[i] * variance;
+        const z = eta + (y[i] - muC) / variance;
+
+        for (let j = 0; j < P; j++) {
+          const wx = wi * xi[j];
+          b[j] += wx * z;
+          for (let k = j; k < P; k++) {
+            A[j][k] += wx * xi[k];
+          }
         }
 
-        const pi = this.sigmoid(dot);
-        const error = pi - yi;
-
-        // Gradient accumulation
-        for (let j = 0; j < this.numFeatures; j++) {
-          gradients[j] += wi * error * xi[j];
-        }
-
-        // Loss calculation (binary cross entropy)
-        const eps = 1e-15;
-        loss -= wi * (yi * Math.log(pi + eps) + (1 - yi) * Math.log(1 - pi + eps));
+        deviance -= 2 * w[i] * (y[i] * Math.log(muC) + (1 - y[i]) * Math.log(1 - muC));
       }
 
-      // Average gradient and update weights
-      let gradNorm = 0;
-      for (let j = 0; j < this.numFeatures; j++) {
-        gradients[j] /= N;
-        gradNorm += gradients[j] * gradients[j];
+      // X'WX is symmetric; mirror the upper triangle and add the ridge.
+      for (let j = 0; j < P; j++) {
+        for (let k = 0; k < j; k++) A[j][k] = A[k][j];
+        A[j][j] += ridge;
       }
-      gradNorm = Math.sqrt(gradNorm);
 
-      // Convergence check
-      if (gradNorm < 1e-6) break;
-
-      // Adjust learning rate over iterations
-      const lr = learningRate / (1 + 0.01 * iter);
-      for (let j = 0; j < this.numFeatures; j++) {
-        this.beta[j] -= lr * gradients[j];
+      let next: number[];
+      try {
+        next = solveLinearSystem(A, b);
+      } catch {
+        this.separationDetected = true;
+        break;
       }
+
+      if (!next.every(v => Number.isFinite(v))) {
+        this.separationDetected = true;
+        break;
+      }
+
+      let maxChange = 0;
+      for (let j = 0; j < P; j++) {
+        maxChange = Math.max(maxChange, Math.abs(next[j] - this.beta[j]));
+      }
+      this.beta = next;
+      this.finalDeviance = deviance;
+
+      // A model that drives most fitted probabilities to the boundary has separated,
+      // whatever the deviance is doing.
+      if (extremeFitted > N * 0.5) this.separationDetected = true;
+
+      if (maxChange < tolerance || Math.abs(prevDeviance - deviance) < 1e-10) {
+        this.converged = true;
+        break;
+      }
+      prevDeviance = deviance;
     }
   }
 
@@ -379,6 +437,55 @@ export function adjustResponsePropensity(
   solver.fit(X, y, baseWeights);
   const propensities = solver.predict(X);
 
+  const warnings: CalibrationWarning[] = [];
+
+  if (solver.separationDetected) {
+    warnings.push({
+      severity: 'error',
+      code: 'PROPENSITY_SEPARATION',
+      message: 'The response model separated: one of the covariates predicts response '
+        + 'perfectly for some group, so the maximum likelihood estimate does not exist and '
+        + 'the fitted probabilities are driven to 0 or 1. The resulting adjustment factors '
+        + 'are not meaningful. Remove the offending covariate, or collapse its categories.'
+    });
+  } else if (!solver.converged) {
+    warnings.push({
+      severity: 'error',
+      code: 'PROPENSITY_NOT_CONVERGED',
+      message: `The response model did not converge after ${solver.iterations} iterations. `
+        + 'The fitted propensities, and every weight derived from them, are unreliable. '
+        + 'Reduce the number of covariates or check for near-duplicate categories.'
+    });
+  }
+
+  // Extreme propensities are the mechanism by which inverse-propensity weighting
+  // destroys precision: a respondent fitted at p = 0.02 stands in for fifty people.
+  const respondentPropensities = propensities.filter((_, i) => y[i] === 1.0);
+  if (respondentPropensities.length > 0) {
+    const pMin = Math.min(...respondentPropensities);
+    const pMax = Math.max(...respondentPropensities);
+    if (pMin < 0.05) {
+      warnings.push({
+        severity: 'warning',
+        code: 'PROPENSITY_EXTREME',
+        message: `The lowest fitted response probability among respondents is `
+          + `${pMin.toFixed(4)}, implying an adjustment factor near ${(1 / pMin).toFixed(0)}x `
+          + 'before trimming. Weighting by the inverse propensity controls bias but not '
+          + 'variance (Little 1986); grouping propensities into adjustment cells is the '
+          + 'standard remedy where a few cases would otherwise dominate.'
+      });
+    }
+    if (Number.isFinite(solver.finalDeviance)) {
+      warnings.push({
+        severity: 'info',
+        code: 'PROPENSITY_FIT',
+        message: `Response model converged in ${solver.iterations} iterations. `
+          + `Fitted response probabilities among respondents range ${pMin.toFixed(3)} to `
+          + `${pMax.toFixed(3)}; residual deviance ${solver.finalDeviance.toFixed(1)}.`
+      });
+    }
+  }
+
   // 4. Calculate adjustment factor and adjusted weights
   // Propensity adjustment factor = 1 / propensity_score
   // Trim factor to prevent extreme variance: cap adjustment at maxWeightMultiplier * medianAdjustment
@@ -421,10 +528,7 @@ export function adjustResponsePropensity(
 
   const respondents = fullSample.filter(row => Number(row[responseCol]) === 1);
 
-  // Propensity-model diagnostics (fit quality, propensity distribution, effective
-  // sample size) belong with the IRLS rewrite in T20; the channel is here so callers
-  // can treat both non-response paths identically.
-  return { respondents, fullSample, warnings: [] };
+  return { respondents, fullSample, warnings };
 }
 
 export interface RakingMargin {

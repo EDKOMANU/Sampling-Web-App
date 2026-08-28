@@ -273,7 +273,31 @@ Verified: `npm test` passes, `npm run typecheck` clean, `npm run build` succeeds
   - Not yet wired into the UI — the engine takes it, the variance tab does not
     expose it. Follow-up logged below.
 - [ ] **T19. Real Deville-Sarndal logit calibration + trim-then-rerake outer loop**
-- [ ] **T20. IRLS for the propensity model + propensity-quintile adjustment cells**
+- [x] **T20. IRLS for the propensity model** — DONE 2026-08-19
+  - Replaced gradient descent (lr 0.05 decaying as 0.05/(1+0.01*iter) over averaged
+    gradients, 500 iterations) with Iteratively Reweighted Least Squares, i.e.
+    Newton-Raphson on the log-likelihood. Converges quadratically in 5-8 steps and
+    reuses the existing `solveLinearSystem`.
+  - The old solver barely moved the coefficients off zero, so every unit was fitted
+    at roughly the overall response rate and the adjustment adjusted nothing — the
+    same silent-no-op shape as T1. VERIFIED: on data where the young group responds
+    at 0.9 and the old at 0.3, IRLS recovers **0.900 and 0.300**; the unconverged
+    solver returns 0.600 for both. Adjustment factors 1.11 vs 3.33 (ratio 3.00).
+  - Diagnostics through the T12 channel: `PROPENSITY_SEPARATION` (a covariate
+    predicts response perfectly, so no MLE exists), `PROPENSITY_NOT_CONVERGED`,
+    `PROPENSITY_EXTREME` (a fitted p below 0.05 implies a 20x+ factor before
+    trimming — Little 1986 on inverse-propensity controlling bias but not variance),
+    and `PROPENSITY_FIT` reporting iterations, propensity range and deviance.
+  - Ridge on X'WX, and mu clamped away from the boundary: separation is routine in
+    response models and would otherwise make the normal equations singular.
+  - Remaining: **propensity-quintile adjustment cells** as the variance-controlling
+    alternative to direct 1/p weighting. Split out as T27.
+
+- [ ] **T27. Propensity-quintile adjustment cells**
+  - Group fitted propensities into quintiles and apply a weighting-class adjustment
+    within each, instead of inverting the propensity per unit. Little (1986) and
+    Valliant/Dever/Kreuter treat this as the default because direct 1/p weighting
+    controls bias but not variance. Reuses the `adjustWeightingClass` machinery.
 - [ ] **T21. Jackknife and BRR-Fay replicate weights**
   - Also: make `generateBootstrapWeights` honour the same LonelyPsuPolicy as the
     Taylor engine; today it silently gives a singleton stratum zero bootstrap
